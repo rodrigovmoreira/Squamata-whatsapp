@@ -1,0 +1,31 @@
+# Produção. Em desenvolvimento o serviço roda nativo (`go run`), sem Docker.
+services:
+  squamata-whatsapp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: squamata-whatsapp
+    restart: unless-stopped
+    # Só o host acessa; o resto do ecossistema fala pela rede interna.
+    ports:
+      - "127.0.0.1:3006:3006"
+    env_file:
+      - .env
+    environment:
+      # Contrato interno do container; `environment` tem precedência sobre o
+      # .env local, onde o caminho do banco é relativo (dev nativo).
+      - SQUAMATA_WHATSAPP_DB_PATH=/data/whatsapp.db
+      - SQUAMATA_WHATSAPP_PORT=3006
+    volumes:
+      # Estado criptográfico do whatsmeow: fora da camada de escrita da imagem.
+      - whatsapp-data:/data
+    networks:
+      - squamata-global
+    stop_grace_period: 15s
+
+volumes:
+  whatsapp-data:
+
+networks:
+  squamata-global:
+    external: true

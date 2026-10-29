@@ -1,0 +1,18 @@
+.git/
+.gitignore
+.dockerignore
+
+# Segredos e dados locais nunca entram na imagem
+.env
+.env.*
+!.env.example
+data/
+*.db
+*.db-wal
+*.db-shm
+backup-*.db
+
+# Artefatos de build e documentação
+bin/
+*.md
+!README.md
