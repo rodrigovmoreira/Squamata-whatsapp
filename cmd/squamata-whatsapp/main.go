@@ -13,9 +13,11 @@ import (
 	"time"
 
 	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/config"
+	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/events"
 	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/httpapi"
 	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/sessions"
 	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/store"
+	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/wa"
 )
 
 const (
@@ -58,7 +60,15 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 
-	api := httpapi.New(repo, db, cfg.InternalToken, logger)
+	dispatcher := events.NewDispatcher(cfg.WebhookURL, cfg.WebhookSecret, logger)
+	if !dispatcher.Enabled() {
+		logger.Warn("webhook desligado: SQUAMATA_WEBHOOK_URL não definido; eventos de sessão não serão publicados")
+	}
+
+	manager := wa.New(db.Container, repo, dispatcher, logger)
+	defer manager.Shutdown()
+
+	api := httpapi.New(repo, db, manager, cfg.InternalToken, logger)
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,
 		Handler:           api.Handler(),
@@ -75,6 +85,9 @@ func run(logger *slog.Logger) error {
 			errs <- err
 		}
 	}()
+
+	// Reconexão das sessões já pareadas, em paralelo ao servidor HTTP.
+	go manager.Start(ctx)
 
 	select {
 	case err := <-errs:

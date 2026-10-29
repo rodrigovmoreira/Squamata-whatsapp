@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/sessions"
+	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/wa"
 )
 
 const maxBodyBytes = 64 << 10
@@ -22,18 +23,28 @@ type HealthChecker interface {
 	Health(ctx context.Context) error
 }
 
-type API struct {
-	repo   *sessions.Repo
-	store  HealthChecker
-	token  string
-	logger *slog.Logger
+// SessionManager é a máquina de estados do pareamento. Interface para que o
+// teste de HTTP rode sem whatsmeow e sem rede.
+type SessionManager interface {
+	Connect(ctx context.Context, tenantID, sessionID string) (sessions.Session, error)
+	Disconnect(ctx context.Context, tenantID, sessionID string) (sessions.Session, error)
+	Delete(ctx context.Context, tenantID, sessionID string) error
+	QRCode(tenantID, sessionID string) (wa.QRCode, error)
 }
 
-func New(repo *sessions.Repo, store HealthChecker, token string, logger *slog.Logger) *API {
+type API struct {
+	repo    *sessions.Repo
+	store   HealthChecker
+	manager SessionManager
+	token   string
+	logger  *slog.Logger
+}
+
+func New(repo *sessions.Repo, store HealthChecker, manager SessionManager, token string, logger *slog.Logger) *API {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &API{repo: repo, store: store, token: token, logger: logger}
+	return &API{repo: repo, store: store, manager: manager, token: token, logger: logger}
 }
 
 // Handler monta o roteamento. Só /health é público; todo o resto exige o
@@ -44,6 +55,9 @@ func (a *API) Handler() http.Handler {
 	protected.HandleFunc("GET /api/v1/tenants/{tenantId}/sessions", a.handleListSessions)
 	protected.HandleFunc("GET /api/v1/tenants/{tenantId}/sessions/{id}", a.handleGetSession)
 	protected.HandleFunc("DELETE /api/v1/tenants/{tenantId}/sessions/{id}", a.handleDeleteSession)
+	protected.HandleFunc("POST /api/v1/tenants/{tenantId}/sessions/{id}/connect", a.handleConnect)
+	protected.HandleFunc("POST /api/v1/tenants/{tenantId}/sessions/{id}/disconnect", a.handleDisconnect)
+	protected.HandleFunc("GET /api/v1/tenants/{tenantId}/sessions/{id}/qr", a.handleQRCode)
 
 	root := http.NewServeMux()
 	root.HandleFunc("GET /api/v1/health", a.handleHealth)
@@ -179,17 +193,74 @@ func (a *API) handleGetSession(w http.ResponseWriter, r *http.Request) {
 func (a *API) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	tenantID, id := r.PathValue("tenantId"), r.PathValue("id")
 
-	if err := a.repo.Delete(r.Context(), tenantID, id); err != nil {
-		if errors.Is(err, sessions.ErrNotFound) {
-			a.writeError(w, http.StatusNotFound, "SESSION_NOT_FOUND", "sessão não encontrada")
-			return
-		}
-		a.logger.Error("falha ao remover sessão", "tenantId", tenantID, "sessionId", id, "erro", err)
-		a.writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "não foi possível remover a sessão")
+	// O gerenciador faz logout, remove o device do sqlstore e só então apaga
+	// o registro — é o único caminho que descarta o device (decisão D6).
+	if err := a.manager.Delete(r.Context(), tenantID, id); err != nil {
+		a.writeManagerError(w, err, tenantID, id, "remover")
 		return
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *API) handleConnect(w http.ResponseWriter, r *http.Request) {
+	tenantID, id := r.PathValue("tenantId"), r.PathValue("id")
+
+	updated, err := a.manager.Connect(r.Context(), tenantID, id)
+	if err != nil {
+		a.writeManagerError(w, err, tenantID, id, "conectar")
+		return
+	}
+	a.writeJSON(w, http.StatusOK, toResponse(updated))
+}
+
+func (a *API) handleDisconnect(w http.ResponseWriter, r *http.Request) {
+	tenantID, id := r.PathValue("tenantId"), r.PathValue("id")
+
+	updated, err := a.manager.Disconnect(r.Context(), tenantID, id)
+	if err != nil {
+		a.writeManagerError(w, err, tenantID, id, "desconectar")
+		return
+	}
+	a.writeJSON(w, http.StatusOK, toResponse(updated))
+}
+
+type qrResponse struct {
+	QR        string    `json:"qr"`
+	Image     string    `json:"image"`
+	ExpiresAt time.Time `json:"expiresAt"`
+}
+
+func (a *API) handleQRCode(w http.ResponseWriter, r *http.Request) {
+	tenantID, id := r.PathValue("tenantId"), r.PathValue("id")
+
+	code, err := a.manager.QRCode(tenantID, id)
+	if err != nil {
+		a.writeManagerError(w, err, tenantID, id, "obter QR")
+		return
+	}
+
+	a.writeJSON(w, http.StatusOK, qrResponse{
+		QR:        code.Payload,
+		Image:     code.Image,
+		ExpiresAt: code.ExpiresAt,
+	})
+}
+
+// writeManagerError traduz os erros do gerenciador no envelope do contrato.
+func (a *API) writeManagerError(w http.ResponseWriter, err error, tenantID, sessionID, action string) {
+	switch {
+	case errors.Is(err, sessions.ErrNotFound):
+		a.writeError(w, http.StatusNotFound, "SESSION_NOT_FOUND", "sessão não encontrada")
+	case errors.Is(err, wa.ErrNoQRCode):
+		a.writeError(w, http.StatusConflict, "QR_NOT_AVAILABLE",
+			"não há QR válido no momento; conecte a sessão e aguarde a geração")
+	default:
+		a.logger.Error("falha na operação de sessão",
+			"acao", action, "tenantId", tenantID, "sessionId", sessionID, "erro", err)
+		a.writeError(w, http.StatusBadGateway, "WHATSAPP_UNAVAILABLE",
+			"não foi possível falar com o WhatsApp agora")
+	}
 }
 
 func (a *API) withSession(w http.ResponseWriter, r *http.Request, fn func(sessions.Session)) {

@@ -30,6 +30,16 @@ func (s Status) Valid() bool {
 	return false
 }
 
+// Active indica que existe client vivo para a sessão. Usado para que connect
+// seja idempotente em vez de criar um segundo client para o mesmo número.
+func (s Status) Active() bool {
+	switch s {
+	case StatusInitializing, StatusQRCode, StatusAuthenticated, StatusReady, StatusDisconnecting:
+		return true
+	}
+	return false
+}
+
 var (
 	ErrNotFound      = errors.New("sessão não encontrada")
 	ErrEmptyTenant   = errors.New("tenantId é obrigatório")
@@ -48,6 +58,9 @@ type Session struct {
 	OwnerUserID string
 	Name        string
 	Phone       string
+	// DeviceJID é o vínculo com o registro do sqlstore. Fica vazio até o
+	// pareamento concluir, porque o device só ganha JID nesse momento.
+	DeviceJID   string
 	Status      Status
 	LastError   string
 	ConnectedAt *time.Time

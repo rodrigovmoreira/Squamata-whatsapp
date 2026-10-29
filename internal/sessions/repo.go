@@ -5,32 +5,44 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 )
 
 const (
-	schemaVersion = 1
+	// schemaVersion é a última migração conhecida. Cada entrada de migrations
+	// leva o banco de (versão-1) para (versão).
+	schemaVersion = 2
 	// RFC3339Nano preserva ordem lexicográfica e mantém o fuso explícito.
 	timeLayout = time.RFC3339Nano
 )
 
-var createStatements = []string{
-	`CREATE TABLE IF NOT EXISTS sessions (
-		id            TEXT PRIMARY KEY,
-		tenant_id     TEXT NOT NULL,
-		owner_user_id TEXT NOT NULL DEFAULT '',
-		name          TEXT NOT NULL,
-		phone         TEXT NOT NULL DEFAULT '',
-		status        TEXT NOT NULL,
-		last_error    TEXT NOT NULL DEFAULT '',
-		connected_at  TEXT,
-		created_at    TEXT NOT NULL,
-		updated_at    TEXT NOT NULL
-	)`,
-	`CREATE INDEX IF NOT EXISTS idx_sessions_tenant_created
-		ON sessions (tenant_id, created_at)`,
+// migrations é aplicada em ordem, com PRAGMA user_version como controle.
+// A v1 criou a tabela; a v2 acrescentou device_jid, que é o vínculo com o
+// registro do sqlstore (o device só ganha JID depois do pareamento).
+var migrations = map[int][]string{
+	1: {
+		`CREATE TABLE IF NOT EXISTS sessions (
+			id            TEXT PRIMARY KEY,
+			tenant_id     TEXT NOT NULL,
+			owner_user_id TEXT NOT NULL DEFAULT '',
+			name          TEXT NOT NULL,
+			phone         TEXT NOT NULL DEFAULT '',
+			status        TEXT NOT NULL,
+			last_error    TEXT NOT NULL DEFAULT '',
+			connected_at  TEXT,
+			created_at    TEXT NOT NULL,
+			updated_at    TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_tenant_created
+			ON sessions (tenant_id, created_at)`,
+	},
+	2: {
+		`ALTER TABLE sessions ADD COLUMN device_jid TEXT NOT NULL DEFAULT ''`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_device_jid ON sessions (device_jid)`,
+	},
 }
 
 // Repo guarda os metadados das sessões no mesmo arquivo SQLite do sqlstore.
@@ -42,7 +54,7 @@ func NewRepo(db *sql.DB) *Repo {
 	return &Repo{db: db}
 }
 
-// Migrate aplica o schema do serviço usando PRAGMA user_version, que é o
+// Migrate aplica as migrações pendentes usando PRAGMA user_version, que é o
 // mecanismo nativo do SQLite e não conflita com as migrações do whatsmeow
 // (elas controlam apenas as tabelas whatsmeow_*).
 func (r *Repo) Migrate(ctx context.Context) error {
@@ -54,23 +66,36 @@ func (r *Repo) Migrate(ctx context.Context) error {
 		return nil
 	}
 
+	for version := current + 1; version <= schemaVersion; version++ {
+		statements, ok := migrations[version]
+		if !ok {
+			return fmt.Errorf("migração %d não definida", version)
+		}
+		if err := r.applyMigration(ctx, version, statements); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Repo) applyMigration(ctx context.Context, version int, statements []string) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("abrir transação de migração: %w", err)
+		return fmt.Errorf("abrir transação da migração %d: %w", version, err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	for _, stmt := range createStatements {
+	for _, stmt := range statements {
 		if _, err := tx.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("aplicar schema de sessões: %w", err)
+			return fmt.Errorf("migração %d: %w", version, err)
 		}
 	}
-	// PRAGMA não aceita placeholder; o valor é uma constante do pacote.
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
-		return fmt.Errorf("gravar user_version: %w", err)
+	// PRAGMA não aceita placeholder; o valor vem de uma constante do pacote.
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", version)); err != nil {
+		return fmt.Errorf("gravar user_version %d: %w", version, err)
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("confirmar migração: %w", err)
+		return fmt.Errorf("confirmar migração %d: %w", version, err)
 	}
 	return nil
 }
@@ -85,14 +110,15 @@ func (r *Repo) Create(ctx context.Context, in Session) (Session, error) {
 	s.ID = uuid.NewString()
 	s.Status = StatusDisconnected
 	s.LastError = ""
+	s.DeviceJID = ""
 	s.ConnectedAt = nil
 	s.CreatedAt = now
 	s.UpdatedAt = now
 
 	_, err := r.db.ExecContext(ctx, `
 		INSERT INTO sessions (id, tenant_id, owner_user_id, name, phone, status,
-			last_error, connected_at, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
+			last_error, connected_at, created_at, updated_at, device_jid)
+		VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, '')`,
 		s.ID, s.TenantID, s.OwnerUserID, s.Name, s.Phone, string(s.Status), s.LastError,
 		s.CreatedAt.Format(timeLayout), s.UpdatedAt.Format(timeLayout),
 	)
@@ -104,10 +130,7 @@ func (r *Repo) Create(ctx context.Context, in Session) (Session, error) {
 
 // Get sempre filtra por tenant: um sessionId de outro tenant não resolve.
 func (r *Repo) Get(ctx context.Context, tenantID, id string) (Session, error) {
-	row := r.db.QueryRowContext(ctx, `
-		SELECT id, tenant_id, owner_user_id, name, phone, status, last_error,
-			connected_at, created_at, updated_at
-		FROM sessions WHERE tenant_id = ? AND id = ?`, tenantID, id)
+	row := r.db.QueryRowContext(ctx, selectColumns+` WHERE tenant_id = ? AND id = ?`, tenantID, id)
 
 	s, err := scanSession(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -120,10 +143,17 @@ func (r *Repo) Get(ctx context.Context, tenantID, id string) (Session, error) {
 }
 
 func (r *Repo) List(ctx context.Context, tenantID string) ([]Session, error) {
-	rows, err := r.db.QueryContext(ctx, `
-		SELECT id, tenant_id, owner_user_id, name, phone, status, last_error,
-			connected_at, created_at, updated_at
-		FROM sessions WHERE tenant_id = ? ORDER BY created_at`, tenantID)
+	return r.query(ctx, selectColumns+` WHERE tenant_id = ? ORDER BY created_at`, tenantID)
+}
+
+// ListPaired devolve todas as sessões já pareadas, de todos os tenants. É o que
+// a reconexão no boot precisa; não é rota HTTP, por isso não filtra tenant.
+func (r *Repo) ListPaired(ctx context.Context) ([]Session, error) {
+	return r.query(ctx, selectColumns+` WHERE device_jid <> '' ORDER BY created_at`)
+}
+
+func (r *Repo) query(ctx context.Context, query string, args ...any) ([]Session, error) {
+	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("listar sessões: %w", err)
 	}
@@ -143,18 +173,61 @@ func (r *Repo) List(ctx context.Context, tenantID string) ([]Session, error) {
 	return list, nil
 }
 
-// UpdateStatus é usado pela máquina de estados do whatsmeow (F2 em diante).
-func (r *Repo) UpdateStatus(ctx context.Context, tenantID, id string, status Status, lastError string) error {
-	if !status.Valid() {
+// RuntimePatch atualiza só os campos informados. A máquina de estados mexe em
+// pedaços diferentes conforme o evento do WhatsApp, então um UPDATE parcial
+// evita sobrescrever o que outro handler acabou de gravar.
+type RuntimePatch struct {
+	Status      *Status
+	LastError   *string
+	Phone       *string
+	DeviceJID   *string
+	ConnectedAt *time.Time
+	ClearConnAt bool
+}
+
+func (r *Repo) UpdateRuntime(ctx context.Context, tenantID, id string, patch RuntimePatch) error {
+	if patch.Status != nil && !patch.Status.Valid() {
 		return ErrInvalidStatus
 	}
 
-	res, err := r.db.ExecContext(ctx, `
-		UPDATE sessions SET status = ?, last_error = ?, updated_at = ?
-		WHERE tenant_id = ? AND id = ?`,
-		string(status), lastError, time.Now().UTC().Truncate(time.Microsecond).Format(timeLayout), tenantID, id)
+	sets := make([]string, 0, 6)
+	args := make([]any, 0, 8)
+
+	if patch.Status != nil {
+		sets = append(sets, "status = ?")
+		args = append(args, string(*patch.Status))
+	}
+	if patch.LastError != nil {
+		sets = append(sets, "last_error = ?")
+		args = append(args, *patch.LastError)
+	}
+	if patch.Phone != nil {
+		sets = append(sets, "phone = ?")
+		args = append(args, *patch.Phone)
+	}
+	if patch.DeviceJID != nil {
+		sets = append(sets, "device_jid = ?")
+		args = append(args, *patch.DeviceJID)
+	}
+	if patch.ConnectedAt != nil {
+		sets = append(sets, "connected_at = ?")
+		args = append(args, patch.ConnectedAt.UTC().Format(timeLayout))
+	} else if patch.ClearConnAt {
+		sets = append(sets, "connected_at = NULL")
+	}
+	if len(sets) == 0 {
+		return nil
+	}
+
+	sets = append(sets, "updated_at = ?")
+	args = append(args, time.Now().UTC().Truncate(time.Microsecond).Format(timeLayout))
+	args = append(args, tenantID, id)
+
+	// #nosec G201 -- os fragmentos vêm de constantes do pacote, nunca do usuário.
+	query := "UPDATE sessions SET " + strings.Join(sets, ", ") + " WHERE tenant_id = ? AND id = ?"
+	res, err := r.db.ExecContext(ctx, query, args...)
 	if err != nil {
-		return fmt.Errorf("atualizar status: %w", err)
+		return fmt.Errorf("atualizar sessão: %w", err)
 	}
 	return ensureAffected(res)
 }
@@ -201,6 +274,11 @@ func ensureAffected(res sql.Result) error {
 	return nil
 }
 
+const selectColumns = `
+	SELECT id, tenant_id, owner_user_id, name, phone, status, last_error,
+		connected_at, created_at, updated_at, device_jid
+	FROM sessions`
+
 type scanner interface {
 	Scan(dest ...any) error
 }
@@ -214,7 +292,7 @@ func scanSession(row scanner) (Session, error) {
 		updatedAt   string
 	)
 	if err := row.Scan(&s.ID, &s.TenantID, &s.OwnerUserID, &s.Name, &s.Phone, &status,
-		&s.LastError, &connectedAt, &createdAt, &updatedAt); err != nil {
+		&s.LastError, &connectedAt, &createdAt, &updatedAt, &s.DeviceJID); err != nil {
 		return Session{}, err
 	}
 

@@ -323,7 +323,9 @@ React: <img src="data:image/png;base64,..." />
 { "qr": "2@abc...", "image": "data:image/png;base64,iVBOR...", "expiresAt": "2026-10-29T14:47:00Z" }
 ```
 
-O QR expira (~20 s) e o `whatsmeow` emite um novo. O serviço mantém o último válido em memória e emite `session.qr` a cada rotação; o painel recebe por socket (o bot reemite o webhook) e não precisa de polling. O `GET .../qr` é fallback para aba recarregada no meio do pareamento.
+O QR expira (~20 s) e o `whatsmeow` emite um novo. O serviço mantém o último válido em memória e emite `session.qr` a cada rotação; o painel recebe por socket (o bot reemite o webhook) e não precisa de polling. O `GET .../qr` é fallback para aba recarregada no meio do pareamento e responde `409 QR_NOT_AVAILABLE` quando ainda não há QR válido.
+
+> **Formato do payload:** na revisão do `whatsmeow` fixada no `go.mod`, o valor de `events.QR.Codes[0]` vem como link (`https://wa.me/settings/l?...`), não mais como a string `2@...`. O painel **não deve interpretar** o conteúdo — só renderizar. Mudar de versão da biblioteca pode mudar esse formato.
 
 ### O que acontece depois da leitura
 
@@ -396,7 +398,7 @@ Regra herdada que continua valendo: a `Tag` do Mongo é a fonte da UI; o WhatsAp
 | :--- | :--- | :--- |
 | **F0 — Spike** | Número de teste; envio/recebimento; validação de `sqlstore` + `modernc` (já feita); levantar API real de labels, LID e contatos | Mensagem real vai e volta sem Chromium; achados de API registrados |
 | **F1 — Esqueleto** | Repo, `/api/v1/health`, store SQLite, tabela `sessions`, auth interna, CRUD de sessão | `go run` sobe nativo; `docker compose up` sobe no servidor; health responde; sessão criada sobrevive a restart |
-| **F2 — Pareamento** | QR, pairing code, máquina de estados, reconexão, eventos | Reiniciar o processo mantém a sessão autenticada; QR chega ao painel; **nenhuma conversa antiga é reprocessada após o pareamento** (D5) |
+| **F2 — Pareamento** | QR (payload + PNG), máquina de estados com janela de 120 s, reconexão no boot, eventos assinados. *Pairing code fica para depois da F3 (D10)* | Reiniciar o processo mantém a sessão autenticada; QR chega ao painel; **nenhuma conversa antiga é reprocessada após o pareamento** (D5) |
 | **F3 — Entrada** | Handler de mensagens, normalização, mídia, webhook HMAC, `message.sent` | Mensagem real chega ao CRM com nome, telefone e texto; imagem chega e é analisada pela visão; reenvio não duplica |
 | **F4 — Saída** | Texto, mídia, presença | Resposta da IA sai pelo número novo; campanha envia imagem |
 | **F5 — Contatos** | `contacts/sync` | Painel sincroniza contatos sem Puppeteer |

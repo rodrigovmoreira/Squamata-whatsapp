@@ -4,11 +4,34 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
+
+// tempDir evita o t.TempDir(): no Windows o arquivo do SQLite pode continuar
+// preso por alguns milissegundos após o Close, e a limpeza do t.TempDir falha
+// o teste ("A pasta não está vazia") por um motivo que não é do código.
+func tempDir(t *testing.T) string {
+	t.Helper()
+
+	dir, err := os.MkdirTemp("", "squamata-sessions-")
+	if err != nil {
+		t.Fatalf("criar diretório temporário: %v", err)
+	}
+	t.Cleanup(func() {
+		for attempt := 0; attempt < 5; attempt++ {
+			if err := os.RemoveAll(dir); err == nil {
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	})
+	return dir
+}
 
 func openTestDB(t *testing.T, path string) *sql.DB {
 	t.Helper()
@@ -30,7 +53,7 @@ func openTestDB(t *testing.T, path string) *sql.DB {
 func newTestRepo(t *testing.T) (*Repo, string) {
 	t.Helper()
 
-	path := filepath.Join(t.TempDir(), "sessions.db")
+	path := filepath.Join(tempDir(t), "sessions.db")
 	repo := NewRepo(openTestDB(t, path))
 	if err := repo.Migrate(context.Background()); err != nil {
 		t.Fatalf("Migrate: %v", err)
@@ -145,7 +168,7 @@ func TestTenantIsolation(t *testing.T) {
 	}
 }
 
-func TestUpdateStatus(t *testing.T) {
+func TestUpdateRuntime(t *testing.T) {
 	repo, _ := newTestRepo(t)
 	ctx := context.Background()
 
@@ -154,8 +177,10 @@ func TestUpdateStatus(t *testing.T) {
 		t.Fatalf("criar: %v", err)
 	}
 
-	if err := repo.UpdateStatus(ctx, "tenant-a", created.ID, StatusReady, ""); err != nil {
-		t.Fatalf("UpdateStatus: %v", err)
+	ready := StatusReady
+	phone := "5511999999999"
+	if err := repo.UpdateRuntime(ctx, "tenant-a", created.ID, RuntimePatch{Status: &ready, Phone: &phone}); err != nil {
+		t.Fatalf("UpdateRuntime: %v", err)
 	}
 	got, err := repo.Get(ctx, "tenant-a", created.ID)
 	if err != nil {
@@ -164,12 +189,118 @@ func TestUpdateStatus(t *testing.T) {
 	if got.Status != StatusReady {
 		t.Errorf("status = %q, esperado %q", got.Status, StatusReady)
 	}
+	if got.Phone != phone {
+		t.Errorf("phone = %q, esperado %q", got.Phone, phone)
+	}
 
-	if err := repo.UpdateStatus(ctx, "tenant-a", created.ID, Status("inventado"), ""); !errors.Is(err, ErrInvalidStatus) {
+	invalid := Status("inventado")
+	if err := repo.UpdateRuntime(ctx, "tenant-a", created.ID, RuntimePatch{Status: &invalid}); !errors.Is(err, ErrInvalidStatus) {
 		t.Errorf("status inválido: erro = %v, esperado ErrInvalidStatus", err)
 	}
-	if err := repo.UpdateStatus(ctx, "tenant-a", "nao-existe", StatusReady, ""); !errors.Is(err, ErrNotFound) {
+	if err := repo.UpdateRuntime(ctx, "tenant-a", "nao-existe", RuntimePatch{Status: &ready}); !errors.Is(err, ErrNotFound) {
 		t.Errorf("sessão inexistente: erro = %v, esperado ErrNotFound", err)
+	}
+}
+
+func TestUpdateRuntimePartialPatchKeepsOtherFields(t *testing.T) {
+	repo, _ := newTestRepo(t)
+	ctx := context.Background()
+
+	created, err := repo.Create(ctx, Session{TenantID: "tenant-a", Name: "Vendas"})
+	if err != nil {
+		t.Fatalf("criar: %v", err)
+	}
+
+	jid := "5511999999999@s.whatsapp.net"
+	ready := StatusReady
+	if err := repo.UpdateRuntime(ctx, "tenant-a", created.ID, RuntimePatch{DeviceJID: &jid, Status: &ready}); err != nil {
+		t.Fatalf("primeiro patch: %v", err)
+	}
+
+	// Segundo patch mexe só no erro e não pode apagar o device_jid nem o status.
+	empty := ""
+	if err := repo.UpdateRuntime(ctx, "tenant-a", created.ID, RuntimePatch{LastError: &empty}); err != nil {
+		t.Fatalf("segundo patch: %v", err)
+	}
+
+	got, err := repo.Get(ctx, "tenant-a", created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.DeviceJID != jid {
+		t.Errorf("device_jid = %q, esperado %q", got.DeviceJID, jid)
+	}
+	if got.Status != StatusReady {
+		t.Errorf("status = %q, esperado %q", got.Status, StatusReady)
+	}
+}
+
+func TestListPaired(t *testing.T) {
+	repo, _ := newTestRepo(t)
+	ctx := context.Background()
+
+	paired, err := repo.Create(ctx, Session{TenantID: "tenant-a", Name: "Pareada"})
+	if err != nil {
+		t.Fatalf("criar pareada: %v", err)
+	}
+	if _, err := repo.Create(ctx, Session{TenantID: "tenant-b", Name: "Não pareada"}); err != nil {
+		t.Fatalf("criar não pareada: %v", err)
+	}
+
+	jid := "5511888888888@s.whatsapp.net"
+	if err := repo.UpdateRuntime(ctx, "tenant-a", paired.ID, RuntimePatch{DeviceJID: &jid}); err != nil {
+		t.Fatalf("marcar device_jid: %v", err)
+	}
+
+	list, err := repo.ListPaired(ctx)
+	if err != nil {
+		t.Fatalf("ListPaired: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("ListPaired = %d sessões, esperado 1", len(list))
+	}
+	if list[0].ID != paired.ID {
+		t.Errorf("id = %q, esperado %q", list[0].ID, paired.ID)
+	}
+}
+
+// TestMigrationFromV1 cobre o banco que já existe em dev: ele foi criado na
+// v1 (sem device_jid) e precisa ganhar a coluna sem perder dados.
+func TestMigrationFromV1(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(tempDir(t), "v1.db")
+	db := openTestDB(t, path)
+
+	for _, stmt := range migrations[1] {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("aplicar schema v1: %v", err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, "PRAGMA user_version = 1"); err != nil {
+		t.Fatalf("marcar user_version: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO sessions (id, tenant_id, owner_user_id, name, phone, status,
+			last_error, created_at, updated_at)
+		VALUES ('antiga', 'tenant-a', '', 'Vendas', '', 'disconnected', '',
+			'2026-10-29T10:00:00Z', '2026-10-29T10:00:00Z')`); err != nil {
+		t.Fatalf("inserir linha da v1: %v", err)
+	}
+
+	repo := NewRepo(db)
+	if err := repo.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	got, err := repo.Get(ctx, "tenant-a", "antiga")
+	if err != nil {
+		t.Fatalf("Get após migração: %v", err)
+	}
+	if got.Name != "Vendas" {
+		t.Errorf("dado da v1 se perdeu: name = %q", got.Name)
+	}
+	if got.DeviceJID != "" {
+		t.Errorf("device_jid = %q, esperado vazio", got.DeviceJID)
 	}
 }
 
@@ -207,7 +338,7 @@ func TestDeleteAndCounts(t *testing.T) {
 // TestPersistenceAcrossReopen é o aceite da F1: a sessão sobrevive ao restart
 // porque o SQLite está em arquivo, não em memória.
 func TestPersistenceAcrossReopen(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "sessions.db")
+	path := filepath.Join(tempDir(t), "sessions.db")
 	ctx := context.Background()
 
 	db := openTestDB(t, path)
