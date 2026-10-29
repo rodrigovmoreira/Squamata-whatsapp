@@ -1,0 +1,14 @@
+# Dados locais do SQLite (nunca versionar: contem chaves de criptografia das sessoes)
+/data/
+*.db
+*.db-wal
+*.db-shm
+
+# Ambiente
+.env
+
+# Build
+/bin/
+
+# Backups gerados por VACUUM INTO
+backup-*.db
