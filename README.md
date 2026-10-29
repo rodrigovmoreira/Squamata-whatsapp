@@ -85,7 +85,7 @@ disconnected ──connect──▶ initializing ──QR──▶ qrcode ──
 
 - `disconnect` **mantém** o device: reconectar não pede QR de novo.
 - `DELETE` é o único caminho que descarta o device (com logout no celular).
-- Celular desconectou o aparelho (`LoggedOut`) ou outra sessão assumiu (`StreamReplaced`): status `error` + `session.auth_failure`, device preservado até um `DELETE` explícito (decisão D6).
+- Celular desconectou o aparelho (`LoggedOut`) ou outra sessão assumiu (`StreamReplaced`): status `error` + `session.auth_failure`, device preservado até um `DELETE` explícito (decisão D6). **Para reparear depois disso é preciso `DELETE` e criar uma sessão nova** — o device antigo não volta a conectar.
 - No boot, sessões com `device_jid` reconectam sozinhas (até 4 tentativas com backoff).
 
 ## Testes
