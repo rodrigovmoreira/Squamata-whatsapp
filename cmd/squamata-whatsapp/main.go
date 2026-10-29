@@ -15,6 +15,7 @@ import (
 	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/config"
 	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/events"
 	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/httpapi"
+	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/outbox"
 	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/sessions"
 	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/store"
 	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/wa"
@@ -60,10 +61,16 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 
-	dispatcher := events.NewDispatcher(cfg.WebhookURL, cfg.WebhookSecret, logger)
-	if !dispatcher.Enabled() {
-		logger.Warn("webhook desligado: SQUAMATA_WEBHOOK_URL não definido; eventos de sessão não serão publicados")
+	outboxRepo := outbox.NewRepo(db.SQL)
+	if err := outboxRepo.EnsureSchema(ctx); err != nil {
+		return err
 	}
+
+	dispatcher := events.NewDispatcher(cfg.WebhookURL, cfg.WebhookSecret, outboxRepo, logger)
+	if !dispatcher.Enabled() {
+		logger.Warn("webhook desligado: SQUAMATA_WEBHOOK_URL não definido; eventos não serão publicados")
+	}
+	go dispatcher.Run(ctx)
 
 	manager := wa.New(db.Container, repo, dispatcher, logger)
 	defer manager.Shutdown()

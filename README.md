@@ -11,8 +11,10 @@ Substitui o `whatsapp-web.js` + Puppeteer que hoje roda **dentro** do processo N
 | Planejamento (paridade, contrato, 12 decisões) | ✅ [PLANEJAMENTO.md](./PLANEJAMENTO.md) |
 | Spike do store (`sqlstore` + `modernc.org/sqlite`) | ✅ `internal/store` |
 | F1 — esqueleto HTTP, tabela de sessões, auth interna, CRUD | ✅ |
-| **F2 — pareamento: QR gerado no Go, máquina de estados, eventos** | ✅ |
-| F3 — entrada de mensagens (webhook + mídia + idempotência) | ⏳ pendente |
+| F2 — pareamento: QR gerado no Go, máquina de estados, eventos | ✅ |
+| **F3 — entrada de mensagens (lado serviço): normalização, mídia, outbox** | ✅ |
+| F3 — lado bot: `services/whatsapp/inbound.js` no Calango-bot | ⏳ pendente |
+| F4 — saída: texto, mídia, presença | ⏳ pendente |
 
 ## Desenvolvimento
 
@@ -68,10 +70,13 @@ Com `SQUAMATA_WEBHOOK_URL` definido, o serviço publica eventos assinados para o
 | `session.status` | Toda transição: `initializing`, `qrcode`, `authenticated`, `ready`, `disconnecting`, `disconnected`, `error` |
 | `session.qr` | A cada rotação do QR (~20 s), com `qr` (payload) e `image` (PNG em data URI) |
 | `session.auth_failure` | Conexão encerrada pelo celular ou substituída por outro aparelho |
+| `message` | Mensagem recebida (texto ou mídia) |
+| `message.sent` | Mensagem enviada **pelo celular** do dono do número (`fromMe`) |
 
+- Todo evento é **persistido no outbox** antes do envio: se o bot estiver fora, a entrega é retomada com backoff (1 s → 5 min, 10 tentativas, fila de 5 000 / 7 dias).
 - Assinatura: `X-Signature: sha256=<hex>`, HMAC-SHA256 do **corpo bruto** com `SQUAMATA_WEBHOOK_SECRET`.
-- Entrega best-effort com 3 tentativas (1 s, 2 s). Mensagens (F3) terão outbox persistido.
 - `HistorySync` **nunca** é publicado: o histórico do produto vive no Mongo (decisão D5).
+- Mídia: bytes (base64) só de `image`/`audio`, até 8 MB; vídeo e documento vão como metadado; acima do teto vem `media.tooLarge: true`.
 
 ## Ciclo de pareamento
 
@@ -94,7 +99,7 @@ disconnected ──connect──▶ initializing ──QR──▶ qrcode ──
 go test ./...
 ```
 
-Cobrem: migração v1→v2 e idempotência, CRUD, isolamento por tenant, persistência após reabrir o banco, auth (401), health saudável e degradado (503), validação de entrada (400), PNG do QR e assinatura HMAC do webhook.
+Cobrem: migração v1→v2 e idempotência, CRUD, isolamento por tenant, persistência após reabrir o banco, auth (401), health saudável e degradado (503), validação de entrada (400), PNG do QR, assinatura HMAC, outbox (enfileirar, reagendar, TTL, teto) e classificação de mensagens (texto/imagem/áudio/vídeo/documento) com o "Iron Gate" de grupos e canais.
 
 ## Produção (Docker)
 
@@ -113,9 +118,12 @@ docker compose up -d
 ```
 cmd/squamata-whatsapp/   binário + flag -health
 internal/config/         variáveis de ambiente, fail-fast
+internal/events/         contrato de eventos + webhook assinado
 internal/httpapi/        rotas, auth interna, health, CRUD
+internal/outbox/         fila persistida dos eventos (D8)
 internal/sessions/       tabela `sessions` (metadados) e repositório
 internal/store/          sqlstore (estado criptográfico) no mesmo arquivo SQLite
+internal/wa/             clients do whatsmeow, pareamento e mensagens
 ```
 
 ## Documentação

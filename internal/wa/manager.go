@@ -54,6 +54,8 @@ type Manager struct {
 
 	mu      sync.RWMutex
 	clients map[string]*managed
+	// mediaSem limita downloads simultâneos de mídia (D1: 4).
+	mediaSem chan struct{}
 }
 
 type managed struct {
@@ -75,7 +77,7 @@ func New(container *sqlstore.Container, repo *sessions.Repo, sink svcEvents.Sink
 		logger = slog.Default()
 	}
 	if sink == nil {
-		sink = svcEvents.NewDispatcher("", "", logger)
+		sink = svcEvents.NewDispatcher("", "", nil, logger)
 	}
 	return &Manager{
 		container: container,
@@ -83,6 +85,7 @@ func New(container *sqlstore.Container, repo *sessions.Repo, sink svcEvents.Sink
 		sink:      sink,
 		logger:    logger,
 		clients:   make(map[string]*managed),
+		mediaSem:  make(chan struct{}, mediaSlots),
 	}
 }
 
@@ -362,6 +365,9 @@ func (m *Manager) handleEvent(st *managed, raw any) {
 	case *waEvents.KeepAliveTimeout:
 		m.logger.Warn("keepalive do WhatsApp expirou",
 			"sessionId", st.sessionID, "falhas", evt.ErrorCount)
+
+	case *waEvents.Message:
+		m.onMessage(ctx, st, evt)
 
 	case *waEvents.HistorySync:
 		// Descartado por decisão (D5): o histórico do produto vive no Mongo.
