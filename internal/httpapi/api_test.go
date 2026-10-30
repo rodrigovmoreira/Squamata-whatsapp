@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -26,14 +27,40 @@ type fakeHealth struct{ err error }
 
 func (f fakeHealth) Health(context.Context) error { return f.err }
 
-// fakeManager registra as chamadas e delega o que é persistência ao repositório
-// real, para o teste de HTTP não precisar de whatsmeow nem de rede.
+// tempDir evita t.TempDir(): no Windows o SQLite pode continuar segurando o
+// arquivo por alguns ms apÃ³s o Close e a limpeza falharia o teste.
+func tempDir(t *testing.T) string {
+	t.Helper()
+
+	dir, err := os.MkdirTemp("", "squamata-httpapi-")
+	if err != nil {
+		t.Fatalf("criar diretÃ³rio temporÃ¡rio: %v", err)
+	}
+	t.Cleanup(func() {
+		for attempt := 0; attempt < 5; attempt++ {
+			if err := os.RemoveAll(dir); err == nil {
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	})
+	return dir
+}
+
+// fakeManager registra as chamadas e delega o que Ã© persistÃªncia ao repositÃ³rio
+// real, para o teste de HTTP nÃ£o precisar de whatsmeow nem de rede.
 type fakeManager struct {
-	repo       *sessions.Repo
-	qr         wa.QRCode
-	qrErr      error
-	connectErr error
-	calls      []string
+	repo         *sessions.Repo
+	qr           wa.QRCode
+	qrErr        error
+	connectErr   error
+	sendTextErr  error
+	sendMediaErr error
+	presenceErr  error
+	lastText     sendTextRequest
+	lastMedia    sendMediaRequest
+	presence     wa.PresenceKind
+	calls        []string
 }
 
 func (f *fakeManager) Connect(ctx context.Context, tenantID, sessionID string) (sessions.Session, error) {
@@ -62,10 +89,28 @@ func (f *fakeManager) QRCode(tenantID, sessionID string) (wa.QRCode, error) {
 	return f.qr, nil
 }
 
+func (f *fakeManager) SendText(_ context.Context, _, _ string, to, text string) error {
+	f.calls = append(f.calls, "sendText")
+	f.lastText = sendTextRequest{To: to, Text: text}
+	return f.sendTextErr
+}
+
+func (f *fakeManager) SendMedia(_ context.Context, _, _ string, to, mediaURL, mime, caption string) error {
+	f.calls = append(f.calls, "sendMedia")
+	f.lastMedia = sendMediaRequest{To: to, MediaURL: mediaURL, Mime: mime, Caption: caption}
+	return f.sendMediaErr
+}
+
+func (f *fakeManager) SendPresence(_ context.Context, _, _ string, _ string, kind wa.PresenceKind) error {
+	f.calls = append(f.calls, "presence")
+	f.presence = kind
+	return f.presenceErr
+}
+
 func newTestHandler(t *testing.T, health HealthChecker) (http.Handler, *fakeManager) {
 	t.Helper()
 
-	path := filepath.Join(t.TempDir(), "api.db")
+	path := filepath.Join(tempDir(t), "api.db")
 	dsn := "file:" + filepath.ToSlash(path) + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -105,7 +150,7 @@ func decode[T any](t *testing.T, rec *httptest.ResponseRecorder) T {
 
 	var payload T
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
-		t.Fatalf("resposta não é JSON válido (%q): %v", rec.Body.String(), err)
+		t.Fatalf("resposta nÃ£o Ã© JSON vÃ¡lido (%q): %v", rec.Body.String(), err)
 	}
 	return payload
 }
@@ -115,7 +160,7 @@ func TestHealthIsPublicAndReportsStore(t *testing.T) {
 
 	rec := do(t, handler, http.MethodGet, "/api/v1/health", "", "")
 	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, esperado 200 (health não exige token)", rec.Code)
+		t.Fatalf("status = %d, esperado 200 (health nÃ£o exige token)", rec.Code)
 	}
 
 	body := decode[healthResponse](t, rec)
@@ -129,12 +174,12 @@ func TestHealthIsPublicAndReportsStore(t *testing.T) {
 		t.Error("store.ok deveria ser true")
 	}
 	if body.Sessions.ByStatus == nil {
-		t.Error("sessions.byStatus não deveria ser nil")
+		t.Error("sessions.byStatus nÃ£o deveria ser nil")
 	}
 }
 
 func TestHealthReturns503WhenStoreFails(t *testing.T) {
-	handler, _ := newTestHandler(t, fakeHealth{err: errors.New("arquivo inacessível")})
+	handler, _ := newTestHandler(t, fakeHealth{err: errors.New("arquivo inacessÃ­vel")})
 
 	rec := do(t, handler, http.MethodGet, "/api/v1/health", "", "")
 	if rec.Code != http.StatusServiceUnavailable {
@@ -176,7 +221,7 @@ func TestSessionLifecycle(t *testing.T) {
 	}
 	session := decode[sessionResponse](t, created)
 	if session.ID == "" {
-		t.Fatal("id não veio na resposta")
+		t.Fatal("id nÃ£o veio na resposta")
 	}
 	if session.Status != string(sessions.StatusDisconnected) {
 		t.Errorf("status = %q, esperado disconnected", session.Status)
@@ -204,7 +249,7 @@ func TestSessionLifecycle(t *testing.T) {
 
 	gone := do(t, handler, http.MethodGet, item, testToken, "")
 	if gone.Code != http.StatusNotFound {
-		t.Fatalf("após remover: status = %d, esperado 404", gone.Code)
+		t.Fatalf("apÃ³s remover: status = %d, esperado 404", gone.Code)
 	}
 	if body := decode[errorBody](t, gone); body.Error.Code != "SESSION_NOT_FOUND" {
 		t.Errorf("code = %q, esperado SESSION_NOT_FOUND", body.Error.Code)
@@ -230,7 +275,7 @@ func TestConnectAndDisconnectRoutes(t *testing.T) {
 	}
 
 	if rec := do(t, handler, http.MethodPost, collection+"/nao-existe/connect", testToken, ""); rec.Code != http.StatusNotFound {
-		t.Errorf("connect em sessão inexistente: status = %d, esperado 404", rec.Code)
+		t.Errorf("connect em sessÃ£o inexistente: status = %d, esperado 404", rec.Code)
 	}
 }
 
@@ -257,7 +302,7 @@ func TestQRCodeRoutes(t *testing.T) {
 	session := decode[sessionResponse](t, created)
 	item := "/api/v1/tenants/tenant-a/sessions/" + session.ID
 
-	// Sem QR gerado ainda: 409, não 500 — o bot deve aguardar.
+	// Sem QR gerado ainda: 409, nÃ£o 500 â€” o bot deve aguardar.
 	manager.qrErr = wa.ErrNoQRCode
 	rec := do(t, handler, http.MethodGet, item+"/qr", testToken, "")
 	if rec.Code != http.StatusConflict {
@@ -292,7 +337,7 @@ func TestTenantIsolationOverHTTP(t *testing.T) {
 
 	rec := do(t, handler, http.MethodGet, "/api/v1/tenants/tenant-b/sessions/"+session.ID, testToken, "")
 	if rec.Code != http.StatusNotFound {
-		t.Errorf("sessão de outro tenant: status = %d, esperado 404", rec.Code)
+		t.Errorf("sessÃ£o de outro tenant: status = %d, esperado 404", rec.Code)
 	}
 }
 
@@ -310,5 +355,101 @@ func TestCreateSessionValidation(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("%s: status = %d, esperado 400", name, rec.Code)
 		}
+	}
+}
+
+func TestSendTextRoute(t *testing.T) {
+	handler, manager := newTestHandler(t, fakeHealth{})
+	created := do(t, handler, http.MethodPost, "/api/v1/tenants/tenant-a/sessions", testToken, `{"name":"Vendas"}`)
+	session := decode[sessionResponse](t, created)
+	item := "/api/v1/tenants/tenant-a/sessions/" + session.ID
+
+	rec := do(t, handler, http.MethodPost, item+"/messages", testToken, `{"to":"11999999999","text":"bom dia"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, esperado 200 (%s)", rec.Code, rec.Body.String())
+	}
+	if !decode[map[string]bool](t, rec)["sent"] {
+		t.Error("resposta deveria conter sent=true")
+	}
+	if manager.lastText.To != "11999999999" || manager.lastText.Text != "bom dia" {
+		t.Errorf("payload repassado = %+v", manager.lastText)
+	}
+}
+
+func TestSendTextErrors(t *testing.T) {
+	cases := map[string]struct {
+		err        error
+		wantStatus int
+		wantCode   string
+	}{
+		"texto vazio":         {wa.ErrEmptyText, http.StatusBadRequest, "VALIDATION_ERROR"},
+		"nÃºmero invÃ¡lido":   {wa.ErrInvalidNumber, http.StatusBadRequest, "VALIDATION_ERROR"},
+		"sessÃ£o caÃ­da":      {wa.ErrSessionNotReady, http.StatusConflict, "SESSION_NOT_CONNECTED"},
+		"sessÃ£o nÃ£o existe": {sessions.ErrNotFound, http.StatusNotFound, "SESSION_NOT_FOUND"},
+		"falha no WhatsApp":   {errors.New("boom"), http.StatusBadGateway, "WHATSAPP_UNAVAILABLE"},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			handler, manager := newTestHandler(t, fakeHealth{})
+			manager.sendTextErr = tc.err
+
+			rec := do(t, handler, http.MethodPost, "/api/v1/tenants/tenant-a/sessions/qualquer/messages", testToken,
+				`{"to":"11999999999","text":"oi"}`)
+
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status = %d, esperado %d", rec.Code, tc.wantStatus)
+			}
+			if body := decode[errorBody](t, rec); body.Error.Code != tc.wantCode {
+				t.Errorf("code = %q, esperado %q", body.Error.Code, tc.wantCode)
+			}
+		})
+	}
+}
+
+func TestSendMediaRoute(t *testing.T) {
+	handler, manager := newTestHandler(t, fakeHealth{})
+	item := "/api/v1/tenants/tenant-a/sessions/sessao-1"
+
+	rec := do(t, handler, http.MethodPost, item+"/messages/media", testToken,
+		`{"to":"11999999999","mediaUrl":"https://exemplo/foto.jpg","mime":"image/jpeg","caption":"segue"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, esperado 200 (%s)", rec.Code, rec.Body.String())
+	}
+	if manager.lastMedia.MediaURL != "https://exemplo/foto.jpg" || manager.lastMedia.Caption != "segue" {
+		t.Errorf("payload repassado = %+v", manager.lastMedia)
+	}
+
+	manager.sendMediaErr = wa.ErrMediaTooLarge
+	big := do(t, handler, http.MethodPost, item+"/messages/media", testToken,
+		`{"to":"11999999999","mediaUrl":"https://exemplo/grande.jpg"}`)
+	if big.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("mÃ­dia grande: status = %d, esperado 413", big.Code)
+	}
+	if body := decode[errorBody](t, big); body.Error.Code != "MEDIA_TOO_LARGE" {
+		t.Errorf("code = %q, esperado MEDIA_TOO_LARGE", body.Error.Code)
+	}
+}
+
+func TestPresenceRouteNeverBlocks(t *testing.T) {
+	handler, manager := newTestHandler(t, fakeHealth{})
+	item := "/api/v1/tenants/tenant-a/sessions/sessao-1"
+
+	manager.presenceErr = wa.ErrSessionNotReady
+	rec := do(t, handler, http.MethodPost, item+"/presence", testToken, `{"to":"11999999999","type":"typing"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("presenÃ§a com falha: status = %d, esperado 200", rec.Code)
+	}
+	if decode[map[string]bool](t, rec)["sent"] {
+		t.Error("sent deveria ser false quando a presenÃ§a falha")
+	}
+	if manager.presence != wa.PresenceTyping {
+		t.Errorf("presenÃ§a repassada = %q", manager.presence)
+	}
+
+	manager.presenceErr = sessions.ErrNotFound
+	missing := do(t, handler, http.MethodPost, item+"/presence", testToken, `{"to":"11999999999","type":"typing"}`)
+	if missing.Code != http.StatusNotFound {
+		t.Errorf("sessÃ£o inexistente: status = %d, esperado 404", missing.Code)
 	}
 }
