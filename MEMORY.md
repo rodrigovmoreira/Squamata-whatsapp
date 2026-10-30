@@ -46,7 +46,7 @@
 | `session.auth_failure` em `LoggedOut` / `StreamReplaced` | idem | deslinkar o aparelho pelo celular |
 | `message` / `message.sent` com mensagem de verdade | a classificação (texto/imagem/áudio/vídeo/documento) e o pipeline de eventos estão testados; falta mensagem real | chip pareado + `inbound.js` no bot |
 | `docker build` e `docker compose up` | daemon ausente na máquina de dev | rodar no Fedora server |
-| Fluxo ponta a ponta com o Calango-bot | `services/whatsapp/inbound.js` ainda não existe no bot | F3 lado bot |
+| Fluxo ponta a ponta com o Calango-bot | o webhook do bot já existe e foi validado com eventos reais (HMAC cruzado), mas nenhuma mensagem de verdade passou por ele | chip pareado |
 | Envio de texto, mídia e presença | rotas de saída são da F4 | F4 |
 
 ## 4. Decisões que mordem depois
