@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/labels"
 	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/sessions"
 	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/wa"
 )
@@ -30,9 +31,16 @@ type SessionManager interface {
 	Disconnect(ctx context.Context, tenantID, sessionID string) (sessions.Session, error)
 	Delete(ctx context.Context, tenantID, sessionID string) error
 	QRCode(tenantID, sessionID string) (wa.QRCode, error)
-	SendText(ctx context.Context, tenantID, sessionID, to, text string) error
-	SendMedia(ctx context.Context, tenantID, sessionID, to, mediaURL, mime, caption string) error
+	SendText(ctx context.Context, tenantID, sessionID, to, text string) (string, error)
+	SendMedia(ctx context.Context, tenantID, sessionID, to, mediaURL, mime, caption string) (string, error)
 	SendPresence(ctx context.Context, tenantID, sessionID, to string, kind wa.PresenceKind) error
+
+	SyncContacts(ctx context.Context, tenantID, sessionID string) ([]wa.Contact, bool, error)
+	ListLabels(ctx context.Context, tenantID, sessionID string) ([]labels.Label, error)
+	UpsertLabel(ctx context.Context, tenantID, sessionID, labelID, name string, color int32) (labels.Label, error)
+	DeleteLabel(ctx context.Context, tenantID, sessionID, labelID string) error
+	SetChatLabels(ctx context.Context, tenantID, sessionID, chatJID string, labelIDs []string) error
+	LabelChats(ctx context.Context, tenantID, sessionID, labelID string) ([]string, error)
 }
 
 type API struct {
@@ -64,6 +72,13 @@ func (a *API) Handler() http.Handler {
 	protected.HandleFunc("POST /api/v1/tenants/{tenantId}/sessions/{id}/messages", a.handleSendText)
 	protected.HandleFunc("POST /api/v1/tenants/{tenantId}/sessions/{id}/messages/media", a.handleSendMedia)
 	protected.HandleFunc("POST /api/v1/tenants/{tenantId}/sessions/{id}/presence", a.handlePresence)
+	protected.HandleFunc("POST /api/v1/tenants/{tenantId}/sessions/{id}/contacts/sync", a.handleSyncContacts)
+	protected.HandleFunc("GET /api/v1/tenants/{tenantId}/sessions/{id}/labels", a.handleListLabels)
+	protected.HandleFunc("POST /api/v1/tenants/{tenantId}/sessions/{id}/labels", a.handleCreateLabel)
+	protected.HandleFunc("PATCH /api/v1/tenants/{tenantId}/sessions/{id}/labels/{labelId}", a.handleUpdateLabel)
+	protected.HandleFunc("DELETE /api/v1/tenants/{tenantId}/sessions/{id}/labels/{labelId}", a.handleDeleteLabel)
+	protected.HandleFunc("GET /api/v1/tenants/{tenantId}/sessions/{id}/labels/{labelId}/chats", a.handleLabelChats)
+	protected.HandleFunc("PUT /api/v1/tenants/{tenantId}/sessions/{id}/chats/{chatId}/labels", a.handleSetChatLabels)
 
 	root := http.NewServeMux()
 	root.HandleFunc("GET /api/v1/health", a.handleHealth)
@@ -283,11 +298,12 @@ func (a *API) handleSendText(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := a.manager.SendText(r.Context(), tenantID, sessionID, req.To, req.Text); err != nil {
+	messageID, err := a.manager.SendText(r.Context(), tenantID, sessionID, req.To, req.Text)
+	if err != nil {
 		a.writeSendError(w, err, tenantID, sessionID, "enviar texto")
 		return
 	}
-	a.writeJSON(w, http.StatusOK, map[string]bool{"sent": true})
+	a.writeJSON(w, http.StatusOK, map[string]any{"sent": true, "messageId": messageID})
 }
 
 type sendMediaRequest struct {
@@ -306,11 +322,12 @@ func (a *API) handleSendMedia(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := a.manager.SendMedia(r.Context(), tenantID, sessionID, req.To, req.MediaURL, req.Mime, req.Caption); err != nil {
+	messageID, err := a.manager.SendMedia(r.Context(), tenantID, sessionID, req.To, req.MediaURL, req.Mime, req.Caption)
+	if err != nil {
 		a.writeSendError(w, err, tenantID, sessionID, "enviar mídia")
 		return
 	}
-	a.writeJSON(w, http.StatusOK, map[string]bool{"sent": true})
+	a.writeJSON(w, http.StatusOK, map[string]any{"sent": true, "messageId": messageID})
 }
 
 type presenceRequest struct {

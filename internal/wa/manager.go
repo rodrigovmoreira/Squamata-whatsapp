@@ -18,6 +18,7 @@ import (
 	waLog "go.mau.fi/whatsmeow/util/log"
 
 	svcEvents "github.com/rodrigovmoreira/Squamata-whatsapp/internal/events"
+	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/labels"
 	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/sessions"
 )
 
@@ -49,6 +50,7 @@ type QRCode struct {
 type Manager struct {
 	container *sqlstore.Container
 	repo      *sessions.Repo
+	labelRepo *labels.Repo
 	sink      svcEvents.Sink
 	logger    *slog.Logger
 
@@ -56,7 +58,16 @@ type Manager struct {
 	clients map[string]*managed
 	// mediaSem limita downloads simultâneos de mídia (D1: 4).
 	mediaSem chan struct{}
+	// sentMu protege o registro de IDs enviados por nós. Serve para não
+	// devolver como `message.sent` o eco da própria mensagem enviada pela API
+	// (senão o CRM duplica cada resposta da IA).
+	sentMu sync.Mutex
+	sent   map[string]time.Time
 }
+
+// sentTTL é quanto tempo um ID enviado por nós fica registrado. Um eco chega
+// em segundos; 5 minutos é folga suficiente.
+const sentTTL = 5 * time.Minute
 
 type managed struct {
 	tenantID  string
@@ -72,7 +83,7 @@ type managed struct {
 	pairing   *time.Timer
 }
 
-func New(container *sqlstore.Container, repo *sessions.Repo, sink svcEvents.Sink, logger *slog.Logger) *Manager {
+func New(container *sqlstore.Container, repo *sessions.Repo, labelRepo *labels.Repo, sink svcEvents.Sink, logger *slog.Logger) *Manager {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -82,10 +93,12 @@ func New(container *sqlstore.Container, repo *sessions.Repo, sink svcEvents.Sink
 	return &Manager{
 		container: container,
 		repo:      repo,
+		labelRepo: labelRepo,
 		sink:      sink,
 		logger:    logger,
 		clients:   make(map[string]*managed),
 		mediaSem:  make(chan struct{}, mediaSlots),
+		sent:      make(map[string]time.Time),
 	}
 }
 
@@ -369,6 +382,9 @@ func (m *Manager) handleEvent(st *managed, raw any) {
 	case *waEvents.Message:
 		m.onMessage(ctx, st, evt)
 
+	case *waEvents.LabelEdit, *waEvents.LabelAssociationChat:
+		m.applyLabelEvents(ctx, st, raw)
+
 	case *waEvents.HistorySync:
 		// Descartado por decisão (D5): o histórico do produto vive no Mongo.
 		return
@@ -547,6 +563,45 @@ func (m *Manager) emitStatus(st *managed, status sessions.Status, message string
 	})
 }
 
+// rememberSent registra que nós enviamos esta mensagem, para descartar o eco.
+func (m *Manager) rememberSent(sessionID, messageID string) {
+	if messageID == "" {
+		return
+	}
+	key := sessionID + "|" + messageID
+
+	m.sentMu.Lock()
+	defer m.sentMu.Unlock()
+	m.sent[key] = time.Now()
+	m.pruneSentLocked()
+}
+
+// consumeSent devolve true (e esquece) se o ID foi enviado por nós.
+func (m *Manager) consumeSent(sessionID, messageID string) bool {
+	if messageID == "" {
+		return false
+	}
+	key := sessionID + "|" + messageID
+
+	m.sentMu.Lock()
+	defer m.sentMu.Unlock()
+
+	if _, ok := m.sent[key]; !ok {
+		return false
+	}
+	delete(m.sent, key)
+	return true
+}
+
+func (m *Manager) pruneSentLocked() {
+	cutoff := time.Now().Add(-sentTTL)
+	for key, at := range m.sent {
+		if at.Before(cutoff) {
+			delete(m.sent, key)
+		}
+	}
+}
+
 func (m *Manager) lookup(sessionID string) *managed {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -596,4 +651,8 @@ func shortID(id string) string {
 		return id
 	}
 	return id[:8]
+}
+
+func nowMillis() int64 {
+	return time.Now().UnixMilli()
 }

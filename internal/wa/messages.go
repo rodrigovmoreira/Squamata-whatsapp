@@ -169,6 +169,12 @@ func (m *Manager) onMessage(ctx context.Context, st *managed, evt *waEvents.Mess
 	}
 
 	phone, raw := m.resolveSender(ctx, st, info)
+
+	// Eco da própria API: se fomos nós que enviamos, o bot já gravou a
+	// mensagem no histórico dele — emitir `message.sent` duplicaria.
+	if info.IsFromMe && m.consumeSent(st.sessionID, string(info.ID)) {
+		return
+	}
 	media := m.buildMedia(ctx, st, evt.Message, body)
 
 	eventName := svcEvents.Message
