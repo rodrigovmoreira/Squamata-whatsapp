@@ -585,6 +585,43 @@ Complemento não automatizável: imagem do backend sem Chromium, smoke test verd
 
 ---
 
+### 15.12 Documentação e specs (higiene)
+
+A limpeza não é só de código. Hoje o ecossistema acumula documento por etapa: `PLANEJAMENTO.md` (593 linhas), `MEMORY.md`, `README.md` e, no Calango-bot, **6 roadmaps** — incluindo o `Roadmap 2 ... .LEGADO.md`. Spec demais é *overengineering*: a mesma informação em três lugares que divergem.
+
+**Um spec por iniciativa, não por etapa.** As fases F0–F8 vivem **dentro** deste arquivo. Criar `f2-pareamento.md`, `f3-entrada.md`… seria exatamente o padrão que se quer evitar.
+
+**Ciclo de vida — para onde o conteúdo vai ao concluir:**
+
+| Conteúdo | Destino permanente |
+| :--- | :--- |
+| Decisão com trade-off | **ADR** (`Calango-docs/docs/ADRs`) — já é o caso do ADR 005 |
+| O que ainda falta | Roadmap do repositório |
+| O que foi feito e as armadilhas | `MEMORY.md` — **uma entrada consolidada do plano inteiro** (§16 do arquivo de regras) |
+| Como usar | `README.md` |
+| Execução em andamento | Spec/planejamento (temporário) |
+
+Fonte de verdade em caso de divergência: **ADR > roadmap > MEMORY > spec > README**.
+
+**Inventário atual e destino de cada documento:**
+
+| Repositório | Documento | Ação |
+| :--- | :--- | :--- |
+| `Calango-docs` | 5 ADRs | **Manter** — é o registro permanente |
+| `Calango-docs` | `docs/spec/ai-rules.md` | **Manter** — é norma, não spec |
+| `Calango-docs` | `docs/templates/spec-template.md` | **Manter** — modelo |
+| `Squamata-whatsapp` | `PLANEJAMENTO.md` | Ao fim da F8: decisões → ADRs, pendências → roadmap, feito/armadilhas → `MEMORY.md`, **apagar** |
+| `Squamata-whatsapp` | `MEMORY.md`, `README.md`, `Dockerfile`, etc. | **Manter** |
+| `Calango-bot` | `Roadmap 1` (concluído) e `Roadmap 3–5` | Consolidar o que foi feito em `docs/MEMORY.md`; **apagar** os concluídos |
+| `Calango-bot` | `Roadmap 2 ... .LEGADO.md` | **Apagar** — superseded pelo Roadmap 2 atual; o histórico fica no git |
+| `Calango-bot` | `Roadmap 2 - Múltiplos WhatsApps.md` | **Manter** durante a migração; ao fim, sobra só o que virou pendência futura (F5–F8) |
+
+**Limite:** no máximo **um spec ativo por iniciativa** e nenhum spec ativo sem execução em andamento. Documento concluído é deletado — `git log` é o arquivo morto.
+
+> Regra gêmea, no `Calango-docs`: a memória recebe **um resumo consolidado ao final do plano**, não um bloco por etapa. Detalhe de cada etapa pertence ao PR.
+
+---
+
 ## 16. Publicação no GitHub (depois do plano aprovado)
 
 1. `git init` + `.gitignore` já cobre `/data/`, `*.db`, `.env`, `backup-*.db`.
