@@ -11,6 +11,7 @@ import (
 	waEvents "go.mau.fi/whatsmeow/types/events"
 
 	svcEvents "github.com/rodrigovmoreira/Squamata-whatsapp/internal/events"
+	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/sessions"
 )
 
 const (
@@ -130,13 +131,25 @@ func extensionFor(mime string) string {
 
 // shouldIgnore reproduz o "Iron Gate" do adaptador antigo: grupos, status,
 // canais e IDs técnicos longos não entram no CRM.
-func shouldIgnore(info types.MessageInfo) bool {
-	if info.IsGroup {
+// shouldIgnore aplica a política da sessão: grupos, canais e broadcast são
+// conteúdo que cada consumidor decide receber ou não.
+func shouldIgnore(info types.MessageInfo, policy sessions.Policy) bool {
+	if info.IsGroup && !policy.ReceiveGroups {
 		return true
 	}
 	switch info.Chat.Server {
-	case types.GroupServer, types.BroadcastServer, types.NewsletterServer:
-		return true
+	case types.GroupServer:
+		if !policy.ReceiveGroups {
+			return true
+		}
+	case types.BroadcastServer:
+		if !policy.ReceiveBroadcast {
+			return true
+		}
+	case types.NewsletterServer:
+		if !policy.ReceiveNewsletters {
+			return true
+		}
 	}
 	return len(digitsOnly(info.Sender.User)) > maxIDDigits
 }
@@ -155,7 +168,7 @@ func digitsOnly(value string) string {
 // evento é `message.sent` (enviado pelo celular) ou `message`.
 func (m *Manager) onMessage(ctx context.Context, st *managed, evt *waEvents.Message) {
 	info := evt.Info
-	if shouldIgnore(info) {
+	if shouldIgnore(info, st.policy) {
 		return
 	}
 
@@ -249,7 +262,18 @@ func (m *Manager) buildMedia(ctx context.Context, st *managed, msg *waE2E.Messag
 		return media
 	}
 
-	if body.Size > maxMediaBytes {
+	// Política de mídia por sessão: consumidores que não precisam de bytes
+	// recebem só os metadados.
+	if st.policy.MediaProfile == string(sessions.MediaProfileMetadata) {
+		return media
+	}
+
+	maxBytes := st.policy.MaxMediaBytes
+	if maxBytes <= 0 {
+		maxBytes = sessions.DefaultMaxMediaBytes
+	}
+
+	if body.Size > uint64(maxBytes) {
 		media.TooLarge = true
 		return media
 	}

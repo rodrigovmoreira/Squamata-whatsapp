@@ -6,6 +6,8 @@ import (
 	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"google.golang.org/protobuf/proto"
+
+	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/sessions"
 )
 
 func TestExtractContent(t *testing.T) {
@@ -131,10 +133,33 @@ func TestShouldIgnore(t *testing.T) {
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			if got := shouldIgnore(tc.info); got != tc.want {
+			if got := shouldIgnore(tc.info, sessions.DefaultPolicy()); got != tc.want {
 				t.Errorf("shouldIgnore = %v, esperado %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// A política é por sessão: quem quiser grupos/canais recebe.
+func TestShouldIgnoreHonorsPolicy(t *testing.T) {
+	group := types.MessageInfo{MessageSource: types.MessageSource{
+		Chat:    types.NewJID("120363335026718801", types.GroupServer),
+		Sender:  types.NewJID("5511987654321", types.DefaultUserServer),
+		IsGroup: true,
+	}}
+	newsletter := types.MessageInfo{MessageSource: types.MessageSource{
+		Chat: types.NewJID("120363335026718801", types.NewsletterServer),
+	}}
+
+	open := sessions.Policy{ReceiveGroups: true, ReceiveNewsletters: true, MediaProfile: string(sessions.MediaProfileChat)}
+	if shouldIgnore(group, open) {
+		t.Error("grupo deveria passar com ReceiveGroups=true")
+	}
+	if shouldIgnore(newsletter, open) {
+		t.Error("canal deveria passar com ReceiveNewsletters=true")
+	}
+	if !shouldIgnore(group, sessions.DefaultPolicy()) {
+		t.Error("grupo deveria ser ignorado com a política padrão")
 	}
 }
 

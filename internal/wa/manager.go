@@ -74,6 +74,8 @@ type managed struct {
 	sessionID string
 	client    *whatsmeow.Client
 	device    *store.Device
+	// policy é a configuração de conteúdo desta sessão (grupos, mídia).
+	policy sessions.Policy
 
 	mu        sync.Mutex
 	status    sessions.Status
@@ -189,6 +191,7 @@ func (m *Manager) Connect(ctx context.Context, tenantID, sessionID string) (sess
 		sessionID: sessionID,
 		client:    client,
 		device:    device,
+		policy:    current.Policy(),
 		status:    sessions.StatusInitializing,
 	}
 	client.AddEventHandler(func(raw any) { m.handleEvent(st, raw) })

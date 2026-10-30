@@ -17,6 +17,7 @@ import (
 
 	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/labels"
 	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/sessions"
+	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/tenants"
 	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/wa"
 
 	_ "modernc.org/sqlite"
@@ -177,7 +178,11 @@ func newTestHandler(t *testing.T, health HealthChecker) (http.Handler, *fakeMana
 
 	manager := &fakeManager{repo: repo, messageID: "ID-1"}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return New(repo, health, manager, testToken, logger).Handler(), manager
+	tenantRepo := tenants.NewRepo(db)
+	if err := tenantRepo.EnsureSchema(context.Background()); err != nil {
+		t.Fatalf("EnsureSchema tenants: %v", err)
+	}
+	return New(repo, health, manager, tenantRepo, testToken, logger).Handler(), manager
 }
 
 func do(t *testing.T, handler http.Handler, method, target, token, body string) *httptest.ResponseRecorder {

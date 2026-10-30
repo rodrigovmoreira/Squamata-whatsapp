@@ -2,17 +2,16 @@ package httpapi
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/labels"
 	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/sessions"
+	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/tenants"
 	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/wa"
 )
 
@@ -47,61 +46,55 @@ type API struct {
 	repo    *sessions.Repo
 	store   HealthChecker
 	manager SessionManager
-	token   string
+	tenants *tenants.Repo
+	auth    *Authenticator
 	logger  *slog.Logger
 }
 
-func New(repo *sessions.Repo, store HealthChecker, manager SessionManager, token string, logger *slog.Logger) *API {
+func New(repo *sessions.Repo, store HealthChecker, manager SessionManager, tenantsRepo *tenants.Repo, token string, logger *slog.Logger) *API {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &API{repo: repo, store: store, manager: manager, token: token, logger: logger}
+	return &API{
+		repo:    repo,
+		store:   store,
+		manager: manager,
+		tenants: tenantsRepo,
+		auth:    NewAuthenticator(token, tenantsRepo, logger),
+		logger:  logger,
+	}
 }
 
-// Handler monta o roteamento. Só /health é público; todo o resto exige o
-// token de serviço para serviço.
+// Handler monta o roteamento. Só /health é público. As rotas de tenant exigem
+// credencial válida E escopo no tenant do caminho; as de administração, token raiz.
 func (a *API) Handler() http.Handler {
 	protected := http.NewServeMux()
-	protected.HandleFunc("POST /api/v1/tenants/{tenantId}/sessions", a.handleCreateSession)
-	protected.HandleFunc("GET /api/v1/tenants/{tenantId}/sessions", a.handleListSessions)
-	protected.HandleFunc("GET /api/v1/tenants/{tenantId}/sessions/{id}", a.handleGetSession)
-	protected.HandleFunc("DELETE /api/v1/tenants/{tenantId}/sessions/{id}", a.handleDeleteSession)
-	protected.HandleFunc("POST /api/v1/tenants/{tenantId}/sessions/{id}/connect", a.handleConnect)
-	protected.HandleFunc("POST /api/v1/tenants/{tenantId}/sessions/{id}/disconnect", a.handleDisconnect)
-	protected.HandleFunc("GET /api/v1/tenants/{tenantId}/sessions/{id}/qr", a.handleQRCode)
-	protected.HandleFunc("POST /api/v1/tenants/{tenantId}/sessions/{id}/messages", a.handleSendText)
-	protected.HandleFunc("POST /api/v1/tenants/{tenantId}/sessions/{id}/messages/media", a.handleSendMedia)
-	protected.HandleFunc("POST /api/v1/tenants/{tenantId}/sessions/{id}/presence", a.handlePresence)
-	protected.HandleFunc("POST /api/v1/tenants/{tenantId}/sessions/{id}/contacts/sync", a.handleSyncContacts)
-	protected.HandleFunc("GET /api/v1/tenants/{tenantId}/sessions/{id}/labels", a.handleListLabels)
-	protected.HandleFunc("POST /api/v1/tenants/{tenantId}/sessions/{id}/labels", a.handleCreateLabel)
-	protected.HandleFunc("PATCH /api/v1/tenants/{tenantId}/sessions/{id}/labels/{labelId}", a.handleUpdateLabel)
-	protected.HandleFunc("DELETE /api/v1/tenants/{tenantId}/sessions/{id}/labels/{labelId}", a.handleDeleteLabel)
-	protected.HandleFunc("GET /api/v1/tenants/{tenantId}/sessions/{id}/labels/{labelId}/chats", a.handleLabelChats)
-	protected.HandleFunc("PUT /api/v1/tenants/{tenantId}/sessions/{id}/chats/{chatId}/labels", a.handleSetChatLabels)
+	protected.HandleFunc("POST /api/v1/tenants", a.auth.rootOnly(a.handleCreateTenant))
+	protected.HandleFunc("GET /api/v1/tenants", a.auth.rootOnly(a.handleListTenants))
+	protected.HandleFunc("PATCH /api/v1/tenants/{tenantId}", a.auth.rootOnly(a.handleUpdateTenant))
+
+	protected.HandleFunc("POST /api/v1/tenants/{tenantId}/sessions", a.auth.tenantScope(a.handleCreateSession))
+	protected.HandleFunc("GET /api/v1/tenants/{tenantId}/sessions", a.auth.tenantScope(a.handleListSessions))
+	protected.HandleFunc("GET /api/v1/tenants/{tenantId}/sessions/{id}", a.auth.tenantScope(a.handleGetSession))
+	protected.HandleFunc("DELETE /api/v1/tenants/{tenantId}/sessions/{id}", a.auth.tenantScope(a.handleDeleteSession))
+	protected.HandleFunc("POST /api/v1/tenants/{tenantId}/sessions/{id}/connect", a.auth.tenantScope(a.handleConnect))
+	protected.HandleFunc("POST /api/v1/tenants/{tenantId}/sessions/{id}/disconnect", a.auth.tenantScope(a.handleDisconnect))
+	protected.HandleFunc("GET /api/v1/tenants/{tenantId}/sessions/{id}/qr", a.auth.tenantScope(a.handleQRCode))
+	protected.HandleFunc("POST /api/v1/tenants/{tenantId}/sessions/{id}/messages", a.auth.tenantScope(a.handleSendText))
+	protected.HandleFunc("POST /api/v1/tenants/{tenantId}/sessions/{id}/messages/media", a.auth.tenantScope(a.handleSendMedia))
+	protected.HandleFunc("POST /api/v1/tenants/{tenantId}/sessions/{id}/presence", a.auth.tenantScope(a.handlePresence))
+	protected.HandleFunc("POST /api/v1/tenants/{tenantId}/sessions/{id}/contacts/sync", a.auth.tenantScope(a.handleSyncContacts))
+	protected.HandleFunc("GET /api/v1/tenants/{tenantId}/sessions/{id}/labels", a.auth.tenantScope(a.handleListLabels))
+	protected.HandleFunc("POST /api/v1/tenants/{tenantId}/sessions/{id}/labels", a.auth.tenantScope(a.handleCreateLabel))
+	protected.HandleFunc("PATCH /api/v1/tenants/{tenantId}/sessions/{id}/labels/{labelId}", a.auth.tenantScope(a.handleUpdateLabel))
+	protected.HandleFunc("DELETE /api/v1/tenants/{tenantId}/sessions/{id}/labels/{labelId}", a.auth.tenantScope(a.handleDeleteLabel))
+	protected.HandleFunc("GET /api/v1/tenants/{tenantId}/sessions/{id}/labels/{labelId}/chats", a.auth.tenantScope(a.handleLabelChats))
+	protected.HandleFunc("PUT /api/v1/tenants/{tenantId}/sessions/{id}/chats/{chatId}/labels", a.auth.tenantScope(a.handleSetChatLabels))
 
 	root := http.NewServeMux()
 	root.HandleFunc("GET /api/v1/health", a.handleHealth)
-	root.Handle("/", a.requireToken(protected))
+	root.Handle("/", a.auth.middleware(protected))
 	return root
-}
-
-func (a *API) requireToken(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		const prefix = "Bearer "
-		header := r.Header.Get("Authorization")
-		if !strings.HasPrefix(header, prefix) {
-			a.writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "token interno ausente ou malformado")
-			return
-		}
-		given := strings.TrimPrefix(header, prefix)
-		if subtle.ConstantTimeCompare([]byte(given), []byte(a.token)) != 1 {
-			a.logger.Warn("token interno inválido", "rota", r.URL.Path, "origem", r.RemoteAddr)
-			a.writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "token interno inválido")
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
 }
 
 type healthResponse struct {
@@ -159,6 +152,13 @@ func (a *API) handleHealth(w http.ResponseWriter, r *http.Request) {
 type createSessionRequest struct {
 	Name        string `json:"name"`
 	OwnerUserID string `json:"ownerUserId"`
+
+	// Política de conteúdo (F-multi-SaaS): cada consumidor decide o que recebe.
+	ReceiveGroups      bool   `json:"receiveGroups"`
+	ReceiveNewsletters bool   `json:"receiveNewsletters"`
+	ReceiveBroadcast   bool   `json:"receiveBroadcast"`
+	MediaProfile       string `json:"mediaProfile"`
+	MaxMediaBytes      int64  `json:"maxMediaBytes"`
 }
 
 func (a *API) handleCreateSession(w http.ResponseWriter, r *http.Request) {
@@ -171,9 +171,14 @@ func (a *API) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	created, err := a.repo.Create(r.Context(), sessions.Session{
-		TenantID:    tenantID,
-		Name:        req.Name,
-		OwnerUserID: req.OwnerUserID,
+		TenantID:           tenantID,
+		Name:               req.Name,
+		OwnerUserID:        req.OwnerUserID,
+		ReceiveGroups:      req.ReceiveGroups,
+		ReceiveNewsletters: req.ReceiveNewsletters,
+		ReceiveBroadcast:   req.ReceiveBroadcast,
+		MediaProfile:       req.MediaProfile,
+		MaxMediaBytes:      req.MaxMediaBytes,
 	})
 	if err != nil {
 		if isValidation(err) {
@@ -426,7 +431,8 @@ func toResponse(s sessions.Session) sessionResponse {
 func isValidation(err error) bool {
 	return errors.Is(err, sessions.ErrEmptyTenant) ||
 		errors.Is(err, sessions.ErrEmptyName) ||
-		errors.Is(err, sessions.ErrNameTooLong)
+		errors.Is(err, sessions.ErrNameTooLong) ||
+		errors.Is(err, sessions.ErrInvalidMediaProfile)
 }
 
 type errorBody struct {
@@ -439,7 +445,14 @@ type errorDetail struct {
 }
 
 func (a *API) writeError(w http.ResponseWriter, status int, code, message string) {
-	a.writeJSON(w, status, errorBody{Error: errorDetail{Code: code, Message: message}})
+	writeJSONError(w, status, code, message)
+}
+
+// writeJSONError é a versão de pacote, usada pelos middlewares de autenticação.
+func writeJSONError(w http.ResponseWriter, status int, code, message string) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(errorBody{Error: errorDetail{Code: code, Message: message}})
 }
 
 func (a *API) writeJSON(w http.ResponseWriter, status int, payload any) {

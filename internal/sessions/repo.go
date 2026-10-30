@@ -14,7 +14,7 @@ import (
 const (
 	// schemaVersion é a última migração conhecida. Cada entrada de migrations
 	// leva o banco de (versão-1) para (versão).
-	schemaVersion = 2
+	schemaVersion = 3
 	// RFC3339Nano preserva ordem lexicográfica e mantém o fuso explícito.
 	timeLayout = time.RFC3339Nano
 )
@@ -42,6 +42,13 @@ var migrations = map[int][]string{
 	2: {
 		`ALTER TABLE sessions ADD COLUMN device_jid TEXT NOT NULL DEFAULT ''`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_device_jid ON sessions (device_jid)`,
+	},
+	3: {
+		`ALTER TABLE sessions ADD COLUMN receive_groups INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE sessions ADD COLUMN receive_newsletters INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE sessions ADD COLUMN receive_broadcast INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE sessions ADD COLUMN media_profile TEXT NOT NULL DEFAULT 'chat'`,
+		`ALTER TABLE sessions ADD COLUMN max_media_bytes INTEGER NOT NULL DEFAULT 8388608`,
 	},
 }
 
@@ -105,6 +112,11 @@ func (r *Repo) Create(ctx context.Context, in Session) (Session, error) {
 		return Session{}, err
 	}
 
+	policy := in.Policy()
+	if err := policy.Normalize(); err != nil {
+		return Session{}, err
+	}
+
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	s := in
 	s.ID = uuid.NewString()
@@ -114,18 +126,33 @@ func (r *Repo) Create(ctx context.Context, in Session) (Session, error) {
 	s.ConnectedAt = nil
 	s.CreatedAt = now
 	s.UpdatedAt = now
+	s.ReceiveGroups = policy.ReceiveGroups
+	s.ReceiveNewsletters = policy.ReceiveNewsletters
+	s.ReceiveBroadcast = policy.ReceiveBroadcast
+	s.MediaProfile = policy.MediaProfile
+	s.MaxMediaBytes = policy.MaxMediaBytes
 
 	_, err := r.db.ExecContext(ctx, `
 		INSERT INTO sessions (id, tenant_id, owner_user_id, name, phone, status,
-			last_error, connected_at, created_at, updated_at, device_jid)
-		VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, '')`,
+			last_error, connected_at, created_at, updated_at, device_jid,
+			receive_groups, receive_newsletters, receive_broadcast, media_profile, max_media_bytes)
+		VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, '', ?, ?, ?, ?, ?)`,
 		s.ID, s.TenantID, s.OwnerUserID, s.Name, s.Phone, string(s.Status), s.LastError,
 		s.CreatedAt.Format(timeLayout), s.UpdatedAt.Format(timeLayout),
+		boolToInt(s.ReceiveGroups), boolToInt(s.ReceiveNewsletters), boolToInt(s.ReceiveBroadcast),
+		s.MediaProfile, s.MaxMediaBytes,
 	)
 	if err != nil {
 		return Session{}, fmt.Errorf("inserir sessão: %w", err)
 	}
 	return s, nil
+}
+
+func boolToInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
 }
 
 // Get sempre filtra por tenant: um sessionId de outro tenant não resolve.
@@ -276,7 +303,8 @@ func ensureAffected(res sql.Result) error {
 
 const selectColumns = `
 	SELECT id, tenant_id, owner_user_id, name, phone, status, last_error,
-		connected_at, created_at, updated_at, device_jid
+		connected_at, created_at, updated_at, device_jid,
+		receive_groups, receive_newsletters, receive_broadcast, media_profile, max_media_bytes
 	FROM sessions`
 
 type scanner interface {
@@ -285,18 +313,23 @@ type scanner interface {
 
 func scanSession(row scanner) (Session, error) {
 	var (
-		s           Session
-		status      string
-		connectedAt sql.NullString
-		createdAt   string
-		updatedAt   string
+		s                              Session
+		status                         string
+		connectedAt                    sql.NullString
+		createdAt                      string
+		updatedAt                      string
+		groups, newsletters, broadcast int
 	)
 	if err := row.Scan(&s.ID, &s.TenantID, &s.OwnerUserID, &s.Name, &s.Phone, &status,
-		&s.LastError, &connectedAt, &createdAt, &updatedAt, &s.DeviceJID); err != nil {
+		&s.LastError, &connectedAt, &createdAt, &updatedAt, &s.DeviceJID,
+		&groups, &newsletters, &broadcast, &s.MediaProfile, &s.MaxMediaBytes); err != nil {
 		return Session{}, err
 	}
 
 	s.Status = Status(status)
+	s.ReceiveGroups = groups == 1
+	s.ReceiveNewsletters = newsletters == 1
+	s.ReceiveBroadcast = broadcast == 1
 	if connectedAt.Valid {
 		if parsed, err := time.Parse(timeLayout, connectedAt.String); err == nil {
 			s.ConnectedAt = &parsed
