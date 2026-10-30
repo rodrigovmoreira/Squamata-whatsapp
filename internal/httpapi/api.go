@@ -23,13 +23,16 @@ type HealthChecker interface {
 	Health(ctx context.Context) error
 }
 
-// SessionManager é a máquina de estados do pareamento. Interface para que o
-// teste de HTTP rode sem whatsmeow e sem rede.
+// SessionManager é a máquina de estados do pareamento mais o envio. Interface
+// para que o teste de HTTP rode sem whatsmeow e sem rede.
 type SessionManager interface {
 	Connect(ctx context.Context, tenantID, sessionID string) (sessions.Session, error)
 	Disconnect(ctx context.Context, tenantID, sessionID string) (sessions.Session, error)
 	Delete(ctx context.Context, tenantID, sessionID string) error
 	QRCode(tenantID, sessionID string) (wa.QRCode, error)
+	SendText(ctx context.Context, tenantID, sessionID, to, text string) error
+	SendMedia(ctx context.Context, tenantID, sessionID, to, mediaURL, mime, caption string) error
+	SendPresence(ctx context.Context, tenantID, sessionID, to string, kind wa.PresenceKind) error
 }
 
 type API struct {
@@ -58,6 +61,9 @@ func (a *API) Handler() http.Handler {
 	protected.HandleFunc("POST /api/v1/tenants/{tenantId}/sessions/{id}/connect", a.handleConnect)
 	protected.HandleFunc("POST /api/v1/tenants/{tenantId}/sessions/{id}/disconnect", a.handleDisconnect)
 	protected.HandleFunc("GET /api/v1/tenants/{tenantId}/sessions/{id}/qr", a.handleQRCode)
+	protected.HandleFunc("POST /api/v1/tenants/{tenantId}/sessions/{id}/messages", a.handleSendText)
+	protected.HandleFunc("POST /api/v1/tenants/{tenantId}/sessions/{id}/messages/media", a.handleSendMedia)
+	protected.HandleFunc("POST /api/v1/tenants/{tenantId}/sessions/{id}/presence", a.handlePresence)
 
 	root := http.NewServeMux()
 	root.HandleFunc("GET /api/v1/health", a.handleHealth)
@@ -260,6 +266,100 @@ func (a *API) writeManagerError(w http.ResponseWriter, err error, tenantID, sess
 			"acao", action, "tenantId", tenantID, "sessionId", sessionID, "erro", err)
 		a.writeError(w, http.StatusBadGateway, "WHATSAPP_UNAVAILABLE",
 			"não foi possível falar com o WhatsApp agora")
+	}
+}
+
+type sendTextRequest struct {
+	To   string `json:"to"`
+	Text string `json:"text"`
+}
+
+func (a *API) handleSendText(w http.ResponseWriter, r *http.Request) {
+	tenantID, sessionID := r.PathValue("tenantId"), r.PathValue("id")
+
+	var req sendTextRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		a.writeError(w, http.StatusBadRequest, "INVALID_BODY", err.Error())
+		return
+	}
+
+	if err := a.manager.SendText(r.Context(), tenantID, sessionID, req.To, req.Text); err != nil {
+		a.writeSendError(w, err, tenantID, sessionID, "enviar texto")
+		return
+	}
+	a.writeJSON(w, http.StatusOK, map[string]bool{"sent": true})
+}
+
+type sendMediaRequest struct {
+	To       string `json:"to"`
+	MediaURL string `json:"mediaUrl"`
+	Mime     string `json:"mime"`
+	Caption  string `json:"caption"`
+}
+
+func (a *API) handleSendMedia(w http.ResponseWriter, r *http.Request) {
+	tenantID, sessionID := r.PathValue("tenantId"), r.PathValue("id")
+
+	var req sendMediaRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		a.writeError(w, http.StatusBadRequest, "INVALID_BODY", err.Error())
+		return
+	}
+
+	if err := a.manager.SendMedia(r.Context(), tenantID, sessionID, req.To, req.MediaURL, req.Mime, req.Caption); err != nil {
+		a.writeSendError(w, err, tenantID, sessionID, "enviar mídia")
+		return
+	}
+	a.writeJSON(w, http.StatusOK, map[string]bool{"sent": true})
+}
+
+type presenceRequest struct {
+	To   string `json:"to"`
+	Type string `json:"type"`
+}
+
+func (a *API) handlePresence(w http.ResponseWriter, r *http.Request) {
+	tenantID, sessionID := r.PathValue("tenantId"), r.PathValue("id")
+
+	var req presenceRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		a.writeError(w, http.StatusBadRequest, "INVALID_BODY", err.Error())
+		return
+	}
+
+	err := a.manager.SendPresence(r.Context(), tenantID, sessionID, req.To, wa.PresenceKind(req.Type))
+	switch {
+	case err == nil:
+		a.writeJSON(w, http.StatusOK, map[string]bool{"sent": true})
+	case errors.Is(err, sessions.ErrNotFound):
+		a.writeError(w, http.StatusNotFound, "SESSION_NOT_FOUND", "sessão não encontrada")
+	default:
+		// Presença é cosmética: o envio da mensagem não depende dela.
+		a.logger.Warn("presença não enviada",
+			"tenantId", tenantID, "sessionId", sessionID, "erro", err)
+		a.writeJSON(w, http.StatusOK, map[string]bool{"sent": false})
+	}
+}
+
+// writeSendError traduz as falhas de envio nos códigos do contrato.
+func (a *API) writeSendError(w http.ResponseWriter, err error, tenantID, sessionID, action string) {
+	switch {
+	case errors.Is(err, sessions.ErrNotFound):
+		a.writeError(w, http.StatusNotFound, "SESSION_NOT_FOUND", "sessão não encontrada")
+	case errors.Is(err, wa.ErrSessionNotReady):
+		a.writeError(w, http.StatusConflict, "SESSION_NOT_CONNECTED",
+			"a sessão não está conectada; conecte e aguarde o status ready")
+	case errors.Is(err, wa.ErrEmptyText), errors.Is(err, wa.ErrInvalidNumber),
+		errors.Is(err, wa.ErrUnsupportedMime):
+		a.writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
+	case errors.Is(err, wa.ErrMediaTooLarge):
+		a.writeError(w, http.StatusRequestEntityTooLarge, "MEDIA_TOO_LARGE",
+			"a mídia excede o limite de 8 MB")
+	default:
+		a.logger.Error("falha ao enviar mensagem",
+			"acao", action, "tenantId", tenantID, "sessionId", sessionID, "erro", err)
+		a.writeError(w, http.StatusBadGateway, "WHATSAPP_UNAVAILABLE",
+			"não foi possível enviar pelo WhatsApp agora")
 	}
 }
 

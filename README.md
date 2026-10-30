@@ -13,8 +13,9 @@ Substitui o `whatsapp-web.js` + Puppeteer que hoje roda **dentro** do processo N
 | F1 — esqueleto HTTP, tabela de sessões, auth interna, CRUD | ✅ |
 | F2 — pareamento: QR gerado no Go, máquina de estados, eventos | ✅ |
 | **F3 — entrada de mensagens (lado serviço): normalização, mídia, outbox** | ✅ |
-| F3 — lado bot: `services/whatsapp/inbound.js` no Calango-bot | ⏳ pendente |
-| F4 — saída: texto, mídia, presença | ⏳ pendente |
+| F3 — lado bot: `services/whatsapp/inbound.js` no Calango-bot | ✅ |
+| **F4 — saída (lado serviço): texto, mídia e presença** | ✅ |
+| F4 — lado bot: `services/whatsapp/client.js` e consumidores | ⏳ pendente |
 
 ## Desenvolvimento
 
@@ -50,7 +51,12 @@ Todas as rotas, exceto `health`, exigem `Authorization: Bearer <SQUAMATA_INTERNA
 | `POST` | `/api/v1/tenants/{tenantId}/sessions/{id}/connect` | Inicia o client; idempotente |
 | `POST` | `/api/v1/tenants/{tenantId}/sessions/{id}/disconnect` | Para o client e **mantém** o pareamento |
 | `GET` | `/api/v1/tenants/{tenantId}/sessions/{id}/qr` | `{ qr, image, expiresAt }` — `409` quando não há QR válido |
+| `POST` | `/api/v1/tenants/{tenantId}/sessions/{id}/messages` | Texto: `{"to":"11999999999","text":"bom dia"}` |
+| `POST` | `/api/v1/tenants/{tenantId}/sessions/{id}/messages/media` | Imagem: `{"to","mediaUrl","mime","caption"}` — o serviço baixa a URL (≤ 8 MB) |
+| `POST` | `/api/v1/tenants/{tenantId}/sessions/{id}/presence` | `{"to","type":"typing"\|"paused"}` — nunca bloqueia o envio |
 | `DELETE` | `/api/v1/tenants/{tenantId}/sessions/{id}` | Logout + remoção do device + registro |
+
+Envio responde `200 {"sent":true}`. Erros: `409 SESSION_NOT_CONNECTED` (sessão existe mas sem client), `400 VALIDATION_ERROR` (texto vazio, número inválido), `413 MEDIA_TOO_LARGE`, `502 WHATSAPP_UNAVAILABLE`.
 
 ```bash
 curl -s localhost:3006/api/v1/health

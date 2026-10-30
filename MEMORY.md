@@ -37,6 +37,14 @@
 - Só `image` e `audio` têm bytes baixados (D1); vídeo e documento vão como metadado para não inflar o base64.
 - O horário original da mensagem (`Info.Timestamp`) é preservado no evento: o `Emit` só preenche `timestamp` quando ele vem zero. Sem isso, o reenvio do outbox jogaria a mensagem para o fim da conversa (D8).
 
+## 2.2 Envio (F4, lado serviço)
+
+- Não existe *builder* de mídia na biblioteca: o envio de imagem é `client.Upload` → montar `waE2E.ImageMessage` com `URL`, `DirectPath`, `MediaKey`, `FileEncSHA256`, `FileSHA256`, `FileLength` → `SendMessage`. Esquecer um desses campos faz o WhatsApp rejeitar em silêncio.
+- Só `image/jpeg`, `image/png` e `image/webp` são aceitos (paridade com o `sendImage` antigo); o resto é `ErrUnsupportedMime`.
+- A URL é baixada com `io.LimitReader(max+1)`: detecta excesso sem carregar um arquivo gigante na memória.
+- `parseTarget` replica a regra antiga do `wwebjsService`: até 12 dígitos ganha DDI `55`; acima disso é tratado como internacional.
+- **Bug pego no teste manual:** sessão que existe no banco mas não tem `client` em memória respondia `404 SESSION_NOT_FOUND` em vez de `409 SESSION_NOT_CONNECTED` — o bot desistiria em vez de avisar "conecte a sessão". Só o repositório distingue os dois casos; há regressão em `send_test.go`.
+
 ## 3. O que ainda **não** dá para validar
 
 | Item | Por que falta | O que destrava |
