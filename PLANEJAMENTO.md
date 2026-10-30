@@ -317,6 +317,8 @@ React: <img src="data:image/png;base64,..." />
 | Imagem PNG exibida no painel | serviço Go |
 | Exibição | painel (`<img>` no lugar de `QRCodeSVG`) |
 
+> **Revisado na F4 (D16):** o painel **continua** com `QRCodeSVG` desenhando o `qr` (payload). O payload é a credencial e o componente atual já a renderiza corretamente — trocar para `<img>` seria mudança sem ganho. O PNG continua sendo gerado e devolvido em `image`, para clientes nativos e diagnóstico.
+
 `GET .../qr` devolve os dois formatos — imagem para a tela, string para diagnóstico e pareamento manual:
 
 ```json
@@ -390,6 +392,23 @@ Regra herdada que continua valendo: a `Tag` do Mongo é a fonte da UI; o WhatsAp
 
 **Sobre os eventos de socket:** hoje o painel escuta `wwebjs_qr` e `wwebjs_status`. Proposta: renomear para `whatsapp_qr`/`whatsapp_status` **na mesma entrega** que muda o frontend (F2), para não sobrar nome de biblioteca morta. O contrato HTTP (`/api/v1/whatsapp/status`) não muda.
 
+### 11.1 Requisitos da virada no bot (levantados na F4)
+
+Itens que o plano original não cobria. Sem eles a migração não fecha.
+
+| # | Requisito | Por que existe |
+| :-- | :--- | :--- |
+| 1 | **O bot cria a sessão** no primeiro `connect` e salva o `sessionId` em `BusinessConfig.whatsappSessionId` (campo **novo**, tipo `String` — hoje só existe dentro de `products[]`, como `ObjectId`) | O painel precisa de um `sessionId`; ninguém cria sessão manualmente |
+| 2 | **`whatsappProvider` não muda no F4**: o valor `'wwebjs'` passa a significar "via serviço"; o rename para `'squamata'` fica no F8 | O `responseService` decide o caminho pelo valor lido do banco; migrar enum e código juntos só aumenta o risco |
+| 3 | **`whatsappId` canônico**: sempre `<dígitos>@s.whatsapp.net`. Consultas aceitam também o formato legado `@c.us` | O `whatsmeow` usa `@s.whatsapp.net`; o `whatsapp-web.js` usava `@c.us`. Sem canonicalizar, nasce contato duplicado e a regex de labels (`/^\d+@c\.us$/`) para de casar |
+| 4 | **QR**: o painel continua com `QRCodeSVG` desenhando o **payload** — zero mudança no frontend. O PNG gerado no Go fica disponível para clientes nativos | A D3 exigia PNG; na prática o componente atual já renderiza o payload corretamente |
+| 5 | **`GET /whatsapp/status` degrada**: serviço fora do ar → `{isConnected:false, mode:'Serviço indisponível'}`, nunca `500` | Hoje o endpoint lê um `Map` síncrono; agora é HTTP e pode falhar |
+| 6 | **`join_session` do socket** passa a consultar o serviço de forma assíncrona | Ele lia `getSessionStatus`/`getSessionQR` locais |
+| 7 | **Sem retry em envio**: `POST .../messages` é não idempotente; repetir duplica mensagem. Retry só em `connect`/`status` | O plano falava só do timeout de 30 s |
+| 8 | **Não carimbar `whatsappSessionId` em `Contact`/`Message`/`Appointment`** antes da F8: esses campos são `ObjectId` e o UUID do serviço causaria `CastError` | Dependência de ordem entre o schema e o carimbo |
+
+**Ficam fora do F4 e continuam no `wwebjsService` até as fases seguintes:** sincronizar contatos (F5), importar/criar labels (F6). Enquanto o boot não inicia sessão wwebjs (D7), essas duas rotas respondem `503` — comportamento esperado e documentado no PR da fase.
+
 ---
 
 ## 12. Fases e critérios de aceite
@@ -448,6 +467,10 @@ Regra herdada que continua valendo: a `Tag` do Mongo é a fonte da UI; o WhatsAp
 | **D10** | **Pareamento por código de 8 dígitos depois da F3** — QR resolve a migração; o código é melhoria de onboarding. |
 | **D11** | **Eventos de socket renomeados** para `whatsapp_qr`/`whatsapp_status` na F2, junto com a mudança do frontend. |
 | **D12** | **Token interno único do ecossistema** (`SQUAMATA_INTERNAL_TOKEN`) no MVP; rotação por serviço depois. |
+| **D13** | **O bot cria a sessão** no primeiro `connect`, salvando o id em `BusinessConfig.whatsappSessionId` (`String`, campo novo). |
+| **D14** | **`whatsappProvider` permanece `'wwebjs'` durante a migração**, significando "via serviço"; rename para `'squamata'` só no F8. |
+| **D15** | **`whatsappId` canônico em `@s.whatsapp.net`**, aceitando `@c.us` na leitura. Sem script de migração: o volume é de dev e a consulta cobre os dois formatos. |
+| **D16** | **QR exibido pelo payload** (`QRCodeSVG`), sem mudar o frontend. O PNG do serviço fica como recurso para clientes futuros. |
 
 ### Ajustes de implementação (não precisam de decisão)
 
