@@ -2,8 +2,6 @@
 
 Conexão de WhatsApp do ecossistema Calango/Squamata como microsserviço independente, em Go, usando [`whatsmeow`](https://github.com/tulir/whatsmeow).
 
-Substitui o `whatsapp-web.js` + Puppeteer que hoje roda **dentro** do processo Node do Calango-bot: sem Chromium, sem scraping de página, uma sessão por número em processo próprio.
-
 ## Status
 
 | Etapa | Situação |
