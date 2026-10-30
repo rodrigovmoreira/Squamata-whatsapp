@@ -47,7 +47,7 @@
 | `message` / `message.sent` com mensagem de verdade | a classificação (texto/imagem/áudio/vídeo/documento) e o pipeline de eventos estão testados; falta mensagem real | chip pareado + `inbound.js` no bot |
 | `docker build` e `docker compose up` | daemon ausente na máquina de dev | rodar no Fedora server |
 | Fluxo ponta a ponta com o Calango-bot | o webhook do bot já existe e foi validado com eventos reais (HMAC cruzado), mas nenhuma mensagem de verdade passou por ele | chip pareado |
-| Envio de texto, mídia e presença | rotas de saída são da F4 | F4 |
+| Envio de texto, mídia e presença | rotas de saída entregues no PR #1 (lado serviço); o lado bot é o próximo PR | PR do bot |
 
 ## 4. Decisões que mordem depois
 
@@ -55,3 +55,10 @@
 - **`HistorySync` é ignorado de propósito** (D5). Se um dia importarmos histórico, tem de ser idempotente por `waMessageId` e **nunca** disparar IA.
 - **Pairing code (8 dígitos) está adiado** (D10) — o QR resolve a migração.
 - **Reparear não apaga o histórico do CRM**: `DELETE` remove device e registro da sessão no SQLite, nunca `Message`/`Contact` do Mongo.
+
+## 5. Onde está a verdade
+
+- Este `MEMORY.md` e o `README.md` são **permanentes**.
+- `PLANEJAMENTO.md` é um **spec temporário**: ao fim da F8, suas decisões viram ADRs em `calango-docs` e o arquivo é **apagado**. Não aponte para ele como referência durável.
+- Ordem de precedência em caso de divergência: **ADR > roadmap > MEMORY > spec > README**.
+- A memória é escrita **ao final do plano**, como resumo consolidado — não um bloco por fase (`ai-rules.md` §4, itens 3 e 5 em `calango-docs`).
