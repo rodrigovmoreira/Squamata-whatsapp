@@ -400,7 +400,7 @@ Regra herdada que continua valendo: a `Tag` do Mongo é a fonte da UI; o WhatsAp
 | **F1 — Esqueleto** | Repo, `/api/v1/health`, store SQLite, tabela `sessions`, auth interna, CRUD de sessão | `go run` sobe nativo; `docker compose up` sobe no servidor; health responde; sessão criada sobrevive a restart |
 | **F2 — Pareamento** | QR (payload + PNG), máquina de estados com janela de 120 s, reconexão no boot, eventos assinados. *Pairing code fica para depois da F3 (D10)* | Reiniciar o processo mantém a sessão autenticada; QR chega ao painel; **nenhuma conversa antiga é reprocessada após o pareamento** (D5) |
 | **F3 — Entrada** | Handler de mensagens, normalização, mídia, outbox e webhook HMAC (lado serviço). O `inbound.js` no bot é o passo seguinte | Mensagem real chega ao CRM com nome, telefone e texto; imagem chega e é analisada pela visão; reenvio não duplica |
-| **F4 — Saída** | Texto, mídia, presença | Resposta da IA sai pelo número novo; campanha envia imagem |
+| **F4 — Saída** | Texto, mídia e presença **no serviço** (lado bot é o PR seguinte: `services/whatsapp/client.js` e consumidores) | Resposta da IA sai pelo número novo; campanha envia imagem |
 | **F5 — Contatos** | `contacts/sync` | Painel sincroniza contatos sem Puppeteer |
 | **F6 — Labels** | CRUD de labels + vínculo a chat | `tagService` cria/edita/exclui label e o painel reflete |
 | **F7 — Multi-sessão** | Sessão nomeada por setor **ou** por usuário; `OwnerUserID` | Duas sessões simultâneas, contextos isolados |
