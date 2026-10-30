@@ -7,8 +7,8 @@ import (
 	"time"
 )
 
-// Status é o estado da sessão. Os valores são exatamente os que o painel do
-// Calango-bot já recebe hoje (getSessionStatus), para não quebrar o frontend.
+// Status Ã© o estado da sessÃ£o. Os valores sÃ£o exatamente os que o painel do
+// Calango-bot jÃ¡ recebe hoje (getSessionStatus), para nÃ£o quebrar o frontend.
 type Status string
 
 const (
@@ -30,8 +30,8 @@ func (s Status) Valid() bool {
 	return false
 }
 
-// Active indica que existe client vivo para a sessão. Usado para que connect
-// seja idempotente em vez de criar um segundo client para o mesmo número.
+// Active indica que existe client vivo para a sessÃ£o. Usado para que connect
+// seja idempotente em vez de criar um segundo client para o mesmo nÃºmero.
 func (s Status) Active() bool {
 	switch s {
 	case StatusInitializing, StatusQRCode, StatusAuthenticated, StatusReady, StatusDisconnecting:
@@ -41,31 +41,106 @@ func (s Status) Active() bool {
 }
 
 var (
-	ErrNotFound      = errors.New("sessão não encontrada")
-	ErrEmptyTenant   = errors.New("tenantId é obrigatório")
-	ErrEmptyName     = errors.New("nome da sessão é obrigatório")
-	ErrNameTooLong   = errors.New("nome da sessão deve ter no máximo 80 caracteres")
-	ErrInvalidStatus = errors.New("status de sessão inválido")
+	ErrNotFound      = errors.New("sessÃ£o nÃ£o encontrada")
+	ErrEmptyTenant   = errors.New("tenantId Ã© obrigatÃ³rio")
+	ErrEmptyName     = errors.New("nome da sessÃ£o Ã© obrigatÃ³rio")
+	ErrNameTooLong   = errors.New("nome da sessÃ£o deve ter no mÃ¡ximo 80 caracteres")
+	ErrInvalidStatus = errors.New("status de sessÃ£o invÃ¡lido")
+	// ErrInvalidMediaProfile: mediaProfile precisa ser "chat" ou "metadata".
+	ErrInvalidMediaProfile = errors.New("mediaProfile invÃ¡lido (use chat ou metadata)")
 )
 
 const maxNameLength = 80
 
-// Session é o metadado da sessão. O estado criptográfico do protocolo fica no
-// sqlstore (tabelas whatsmeow_*); aqui só vive o que é nosso.
+func (s Status) valid() bool { return s.Valid() }
+
+// MediaProfile define quanto de mÃ­dia o serviÃ§o baixa antes de publicar o evento.
+//   - "chat"     (padrÃ£o): bytes de image/audio atÃ© MaxMediaBytes
+//   - "metadata": nenhum byte, apenas metadados
+//
+// Ã‰ configuraÃ§Ã£o por sessÃ£o porque cada SaaS tem um consumidor com requisitos
+// prÃ³prios (D1 nasceu do Calango-bot, nÃ£o Ã© regra do ecossistema).
+type MediaProfile string
+
+const (
+	MediaProfileChat     MediaProfile = "chat"
+	MediaProfileMetadata MediaProfile = "metadata"
+
+	// DefaultMaxMediaBytes Ã© o teto herdado da D1 (8 MB).
+	DefaultMaxMediaBytes int64 = 8 << 20
+)
+
+func (p MediaProfile) valid() bool {
+	return p == MediaProfileChat || p == MediaProfileMetadata
+}
+
+// Policy reÃºne o que varia por consumidor. O default reproduz o comportamento
+// do Calango-bot: sem grupos, canais nem broadcast, mÃ­dia de chat atÃ© 8 MB.
+type Policy struct {
+	ReceiveGroups      bool
+	ReceiveNewsletters bool
+	ReceiveBroadcast   bool
+	MediaProfile       string
+	MaxMediaBytes      int64
+}
+
+func DefaultPolicy() Policy {
+	return Policy{
+		MediaProfile:  string(MediaProfileChat),
+		MaxMediaBytes: DefaultMaxMediaBytes,
+	}
+}
+
+// Normalize preenche defaults e valida.
+func (p *Policy) Normalize() error {
+	if p.MediaProfile == "" {
+		p.MediaProfile = string(MediaProfileChat)
+	}
+	if !MediaProfile(p.MediaProfile).valid() {
+		return ErrInvalidMediaProfile
+	}
+	if p.MaxMediaBytes <= 0 {
+		p.MaxMediaBytes = DefaultMaxMediaBytes
+	}
+	return nil
+}
+
+// Session Ã© o metadado da sessÃ£o. O estado criptogrÃ¡fico do protocolo fica no
+// sqlstore (tabelas whatsmeow_*); aqui sÃ³ vive o que Ã© nosso.
 type Session struct {
 	ID          string
 	TenantID    string
 	OwnerUserID string
 	Name        string
 	Phone       string
-	// DeviceJID é o vínculo com o registro do sqlstore. Fica vazio até o
-	// pareamento concluir, porque o device só ganha JID nesse momento.
+	// DeviceJID Ã© o vÃ­nculo com o registro do sqlstore. Fica vazio atÃ© o
+	// pareamento concluir, porque o device sÃ³ ganha JID nesse momento.
 	DeviceJID   string
 	Status      Status
 	LastError   string
 	ConnectedAt *time.Time
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
+
+	// PolÃ­tica de conteÃºdo desta sessÃ£o (ver Policy).
+	ReceiveGroups      bool
+	ReceiveNewsletters bool
+	ReceiveBroadcast   bool
+	MediaProfile       string
+	MaxMediaBytes      int64
+}
+
+// Policy devolve a polÃ­tica efetiva da sessÃ£o.
+func (s Session) Policy() Policy {
+	p := Policy{
+		ReceiveGroups:      s.ReceiveGroups,
+		ReceiveNewsletters: s.ReceiveNewsletters,
+		ReceiveBroadcast:   s.ReceiveBroadcast,
+		MediaProfile:       s.MediaProfile,
+		MaxMediaBytes:      s.MaxMediaBytes,
+	}
+	_ = p.Normalize()
+	return p
 }
 
 // Normalize valida e limpa os campos de entrada antes de persistir.

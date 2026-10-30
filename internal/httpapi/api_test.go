@@ -15,7 +15,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/labels"
 	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/sessions"
+	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/tenants"
 	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/wa"
 
 	_ "modernc.org/sqlite"
@@ -57,6 +59,10 @@ type fakeManager struct {
 	sendTextErr  error
 	sendMediaErr error
 	presenceErr  error
+	syncErr      error
+	labelErr     error
+	messageID    string
+	labelIDs     []string
 	lastText     sendTextRequest
 	lastMedia    sendMediaRequest
 	presence     wa.PresenceKind
@@ -89,22 +95,68 @@ func (f *fakeManager) QRCode(tenantID, sessionID string) (wa.QRCode, error) {
 	return f.qr, nil
 }
 
-func (f *fakeManager) SendText(_ context.Context, _, _ string, to, text string) error {
+func (f *fakeManager) SendText(_ context.Context, _, _ string, to, text string) (string, error) {
 	f.calls = append(f.calls, "sendText")
 	f.lastText = sendTextRequest{To: to, Text: text}
-	return f.sendTextErr
+	return f.messageID, f.sendTextErr
 }
 
-func (f *fakeManager) SendMedia(_ context.Context, _, _ string, to, mediaURL, mime, caption string) error {
+func (f *fakeManager) SendMedia(_ context.Context, _, _ string, to, mediaURL, mime, caption string) (string, error) {
 	f.calls = append(f.calls, "sendMedia")
 	f.lastMedia = sendMediaRequest{To: to, MediaURL: mediaURL, Mime: mime, Caption: caption}
-	return f.sendMediaErr
+	return f.messageID, f.sendMediaErr
 }
 
 func (f *fakeManager) SendPresence(_ context.Context, _, _ string, _ string, kind wa.PresenceKind) error {
 	f.calls = append(f.calls, "presence")
 	f.presence = kind
 	return f.presenceErr
+}
+
+func (f *fakeManager) SyncContacts(_ context.Context, _, _ string) ([]wa.Contact, bool, error) {
+	f.calls = append(f.calls, "syncContacts")
+	if f.syncErr != nil {
+		return nil, false, f.syncErr
+	}
+	return []wa.Contact{{JID: "5511999999999@s.whatsapp.net", Phone: "5511999999999", Name: "Ana", PushName: "Ana"}}, false, nil
+}
+
+func (f *fakeManager) ListLabels(_ context.Context, _, _ string) ([]labels.Label, error) {
+	f.calls = append(f.calls, "listLabels")
+	if f.labelErr != nil {
+		return nil, f.labelErr
+	}
+	return []labels.Label{{LabelID: "1", Name: "Cliente", Color: 3}}, nil
+}
+
+func (f *fakeManager) UpsertLabel(_ context.Context, _, _, labelID, name string, color int32) (labels.Label, error) {
+	f.calls = append(f.calls, "upsertLabel")
+	if f.labelErr != nil {
+		return labels.Label{}, f.labelErr
+	}
+	if labelID == "" {
+		labelID = "novo"
+	}
+	return labels.Label{LabelID: labelID, Name: name, Color: color}, nil
+}
+
+func (f *fakeManager) DeleteLabel(_ context.Context, _, _, _ string) error {
+	f.calls = append(f.calls, "deleteLabel")
+	return f.labelErr
+}
+
+func (f *fakeManager) SetChatLabels(_ context.Context, _, _, _ string, ids []string) error {
+	f.calls = append(f.calls, "setChatLabels")
+	f.labelIDs = ids
+	return f.labelErr
+}
+
+func (f *fakeManager) LabelChats(_ context.Context, _, _, _ string) ([]string, error) {
+	f.calls = append(f.calls, "labelChats")
+	if f.labelErr != nil {
+		return nil, f.labelErr
+	}
+	return []string{"5511999999999@s.whatsapp.net"}, nil
 }
 
 func newTestHandler(t *testing.T, health HealthChecker) (http.Handler, *fakeManager) {
@@ -124,9 +176,13 @@ func newTestHandler(t *testing.T, health HealthChecker) (http.Handler, *fakeMana
 		t.Fatalf("Migrate: %v", err)
 	}
 
-	manager := &fakeManager{repo: repo}
+	manager := &fakeManager{repo: repo, messageID: "ID-1"}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return New(repo, health, manager, testToken, logger).Handler(), manager
+	tenantRepo := tenants.NewRepo(db)
+	if err := tenantRepo.EnsureSchema(context.Background()); err != nil {
+		t.Fatalf("EnsureSchema tenants: %v", err)
+	}
+	return New(repo, health, manager, tenantRepo, testToken, logger).Handler(), manager
 }
 
 func do(t *testing.T, handler http.Handler, method, target, token, body string) *httptest.ResponseRecorder {
@@ -368,11 +424,14 @@ func TestSendTextRoute(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, esperado 200 (%s)", rec.Code, rec.Body.String())
 	}
-	if !decode[map[string]bool](t, rec)["sent"] {
+	if !decode[map[string]any](t, rec)["sent"].(bool) {
 		t.Error("resposta deveria conter sent=true")
 	}
 	if manager.lastText.To != "11999999999" || manager.lastText.Text != "bom dia" {
 		t.Errorf("payload repassado = %+v", manager.lastText)
+	}
+	if got := decode[map[string]any](t, rec)["messageId"]; got != "ID-1" {
+		t.Errorf("messageId = %v, esperado ID-1", got)
 	}
 }
 

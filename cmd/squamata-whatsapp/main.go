@@ -15,9 +15,11 @@ import (
 	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/config"
 	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/events"
 	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/httpapi"
+	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/labels"
 	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/outbox"
 	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/sessions"
 	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/store"
+	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/tenants"
 	"github.com/rodrigovmoreira/Squamata-whatsapp/internal/wa"
 )
 
@@ -66,16 +68,28 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 
+	labelRepo := labels.NewRepo(db.SQL)
+	if err := labelRepo.EnsureSchema(ctx); err != nil {
+		return err
+	}
+
+	tenantRepo := tenants.NewRepo(db.SQL)
+	if err := tenantRepo.EnsureSchema(ctx); err != nil {
+		return err
+	}
+
 	dispatcher := events.NewDispatcher(cfg.WebhookURL, cfg.WebhookSecret, outboxRepo, logger)
+	// Multi-SaaS: cada tenant publica no próprio webhook; o global é fallback.
+	dispatcher.WithResolver(tenantRepo)
 	if !dispatcher.Enabled() {
-		logger.Warn("webhook desligado: SQUAMATA_WEBHOOK_URL não definido; eventos não serão publicados")
+		logger.Warn("webhook desligado: nenhum tenant com webhook e SQUAMATA_WEBHOOK_URL vazio")
 	}
 	go dispatcher.Run(ctx)
 
-	manager := wa.New(db.Container, repo, dispatcher, logger)
+	manager := wa.New(db.Container, repo, labelRepo, dispatcher, logger)
 	defer manager.Shutdown()
 
-	api := httpapi.New(repo, db, manager, cfg.InternalToken, logger)
+	api := httpapi.New(repo, db, manager, tenantRepo, cfg.InternalToken, logger)
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,
 		Handler:           api.Handler(),

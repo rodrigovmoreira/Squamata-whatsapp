@@ -33,8 +33,26 @@ Variáveis:
 | `SQUAMATA_INTERNAL_TOKEN` | — | **Obrigatória.** Sem ela o serviço não sobe (fail-fast) |
 | `SQUAMATA_WHATSAPP_PORT` | `3006` | |
 | `SQUAMATA_WHATSAPP_DB_PATH` | `./data/whatsapp.db` | Em produção: `/data/whatsapp.db` (volume) |
-| `SQUAMATA_WEBHOOK_URL` | — | Webhook do Calango-bot. Vazio = eventos desligados |
-| `SQUAMATA_WEBHOOK_SECRET` | — | Segredo do HMAC em `X-Signature` |
+| `SQUAMATA_WEBHOOK_URL` | — | Webhook **padrão** (fallback). O ideal é configurar por tenant |
+| `SQUAMATA_WEBHOOK_SECRET` | — | Segredo do HMAC em `X-Signature` (padrão) |
+
+### Multi-SaaS (multi-tenant)
+
+O serviço atende vários SaaS. Cada um é um **tenant** com token e webhook próprios:
+
+```bash
+# 1. Token raiz cria o tenant e devolve o token (mostrado uma única vez)
+POST /api/v1/tenants   {"id":"calango-food","webhookUrl":"https://food/hook","webhookSecret":"..."}
+→ {"id":"calango-food","token":"<64 hex>","hasWebhookSecret":true}
+
+# 2. O SaaS usa o próprio token
+GET /api/v1/tenants/calango-food/sessions  Authorization: Bearer <token do tenant>
+```
+
+- `SQUAMATA_INTERNAL_TOKEN` é o **token raiz**: acessa todos os tenants (bootstrap e operação). Os tokens de tenant só acessam o próprio caminho — outro tenant recebe `403 TENANT_FORBIDDEN`.
+- Tokens são gravados como **hash SHA-256**; o valor em claro só aparece na criação.
+- Eventos vão para o webhook **do tenant**; sem webhook próprio, cai no `SQUAMATA_WEBHOOK_URL`.
+- Administração (`POST/GET /tenants`, `PATCH /tenants/:id`) exige token raiz.
 
 ## API
 
@@ -43,12 +61,15 @@ Todas as rotas, exceto `health`, exigem `Authorization: Bearer <SQUAMATA_INTERNA
 | Método | Rota | O que faz |
 | :--- | :--- | :--- |
 | `GET` | `/api/v1/health` | Processo **e** banco (store acessível + contagem de sessões) |
-| `POST` | `/api/v1/tenants/{tenantId}/sessions` | Cria sessão (`{"name":"Vendas","ownerUserId":"opcional"}`) |
+| `POST` | `/api/v1/tenants/{tenantId}/sessions` | Cria sessão. Política opcional: `{receiveGroups, receiveNewsletters, receiveBroadcast, mediaProfile, maxMediaBytes}` |
 | `GET` | `/api/v1/tenants/{tenantId}/sessions` | Lista sessões do tenant |
 | `GET` | `/api/v1/tenants/{tenantId}/sessions/{id}` | Detalhe |
 | `POST` | `/api/v1/tenants/{tenantId}/sessions/{id}/connect` | Inicia o client; idempotente |
 | `POST` | `/api/v1/tenants/{tenantId}/sessions/{id}/disconnect` | Para o client e **mantém** o pareamento |
 | `GET` | `/api/v1/tenants/{tenantId}/sessions/{id}/qr` | `{ qr, image, expiresAt }` — `409` quando não há QR válido |
+| `POST` | `/api/v1/tenants` | **Token raiz.** Cria tenant e devolve o token (uma vez) |
+| `GET` | `/api/v1/tenants` | **Token raiz.** Lista tenants |
+| `PATCH` | `/api/v1/tenants/{tenantId}` | **Token raiz.** Atualiza `webhookUrl`/`webhookSecret` |
 | `POST` | `/api/v1/tenants/{tenantId}/sessions/{id}/messages` | Texto: `{"to":"11999999999","text":"bom dia"}` |
 | `POST` | `/api/v1/tenants/{tenantId}/sessions/{id}/messages/media` | Imagem: `{"to","mediaUrl","mime","caption"}` — o serviço baixa a URL (≤ 8 MB) |
 | `POST` | `/api/v1/tenants/{tenantId}/sessions/{id}/presence` | `{"to","type":"typing"\|"paused"}` — nunca bloqueia o envio |

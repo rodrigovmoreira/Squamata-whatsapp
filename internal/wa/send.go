@@ -48,37 +48,42 @@ func (k PresenceKind) Valid() bool {
 
 // SendText envia texto para um contato. Reflete o `sendWWebJSMessage` antigo:
 // aceita número nacional (adiciona 55) e internacional.
-func (m *Manager) SendText(ctx context.Context, tenantID, sessionID, to, text string) error {
+// Devolve o ID da mensagem no WhatsApp (usado para dedup do eco — ver onMessage).
+func (m *Manager) SendText(ctx context.Context, tenantID, sessionID, to, text string) (string, error) {
 	if strings.TrimSpace(text) == "" {
-		return ErrEmptyText
+		return "", ErrEmptyText
 	}
 
 	st, jid, err := m.prepareSend(ctx, tenantID, sessionID, to)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	sendCtx, cancel := context.WithTimeout(ctx, sendTimeout)
 	defer cancel()
 
-	if _, err := st.client.SendMessage(sendCtx, jid, &waE2E.Message{
+	resp, err := st.client.SendMessage(sendCtx, jid, &waE2E.Message{
 		Conversation: proto.String(text),
-	}); err != nil {
-		return fmt.Errorf("enviar texto para %s: %w", jid.String(), err)
+	})
+	if err != nil {
+		return "", fmt.Errorf("enviar texto para %s: %w", jid.String(), err)
 	}
-	return nil
+
+	messageID := string(resp.ID)
+	m.rememberSent(st.sessionID, messageID)
+	return messageID, nil
 }
 
 // SendMedia baixa a imagem da URL e envia com legenda. O bot nunca manda bytes:
 // ele passa a URL (campanha/Firebase ou IA), como fazia com o axios no Node.
-func (m *Manager) SendMedia(ctx context.Context, tenantID, sessionID, to, mediaURL, mime, caption string) error {
+func (m *Manager) SendMedia(ctx context.Context, tenantID, sessionID, to, mediaURL, mime, caption string) (string, error) {
 	if strings.TrimSpace(mediaURL) == "" {
-		return fmt.Errorf("%w: mediaUrl é obrigatório", ErrUnsupportedMime)
+		return "", fmt.Errorf("%w: mediaUrl é obrigatório", ErrUnsupportedMime)
 	}
 
 	st, jid, err := m.prepareSend(ctx, tenantID, sessionID, to)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	sendCtx, cancel := context.WithTimeout(ctx, mediaSendTimeout)
@@ -86,15 +91,15 @@ func (m *Manager) SendMedia(ctx context.Context, tenantID, sessionID, to, mediaU
 
 	data, contentType, err := downloadMedia(sendCtx, mediaURL, mime)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if contentType != "image/jpeg" && contentType != "image/png" && contentType != "image/webp" {
-		return fmt.Errorf("%w: %s", ErrUnsupportedMime, contentType)
+		return "", fmt.Errorf("%w: %s", ErrUnsupportedMime, contentType)
 	}
 
 	uploaded, err := st.client.Upload(sendCtx, data, whatsmeow.MediaImage)
 	if err != nil {
-		return fmt.Errorf("subir mídia para o WhatsApp: %w", err)
+		return "", fmt.Errorf("subir mídia para o WhatsApp: %w", err)
 	}
 
 	image := &waE2E.ImageMessage{
@@ -110,10 +115,14 @@ func (m *Manager) SendMedia(ctx context.Context, tenantID, sessionID, to, mediaU
 		image.Caption = proto.String(caption)
 	}
 
-	if _, err := st.client.SendMessage(sendCtx, jid, &waE2E.Message{ImageMessage: image}); err != nil {
-		return fmt.Errorf("enviar imagem para %s: %w", jid.String(), err)
+	resp, err := st.client.SendMessage(sendCtx, jid, &waE2E.Message{ImageMessage: image})
+	if err != nil {
+		return "", fmt.Errorf("enviar imagem para %s: %w", jid.String(), err)
 	}
-	return nil
+
+	messageID := string(resp.ID)
+	m.rememberSent(st.sessionID, messageID)
+	return messageID, nil
 }
 
 // SendPresence é cosmético: "digitando…" ou pausado. Nunca impede o envio da
